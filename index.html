@@ -6,10 +6,10 @@
 <title>Ticker Indicadores CL</title>
 <style>
   :root{
-    --alto: 40px;          /* Altura visible del ticker */
-    --velocidad: 35s;      /* Duración del loop (↑ más lento) */
+    --alto: 40px;          /* Ajusta la altura visible del ticker */
+    --velocidad: 35s;      /* Ajusta la velocidad de desplazamiento (↓ más grande = más lento) */
     --padX: 24px;          /* Separación entre items */
-    --bg: #0b1220;         /* Fondo */
+    --bg: #0b1220;         /* Fondo (oscuro elegante) */
     --fg: #e6edf6;         /* Texto principal */
     --muted: #9fb0c7;      /* Texto secundario */
     --accent: #7cc4ff;     /* Acento */
@@ -25,12 +25,17 @@
     overflow: hidden;
     background: var(--bg);
     color: var(--fg);
+    border: 0;
   }
+
+  /* Sombra suave arriba/abajo para integrar visualmente */
   .ticker-wrap::before,
   .ticker-wrap::after{
     content:"";
-    position:absolute; left:0; right:0;
-    height:8px; pointer-events:none;
+    position:absolute;
+    left:0; right:0;
+    height:8px;
+    pointer-events:none;
   }
   .ticker-wrap::before{top:0; background: linear-gradient(to bottom, rgba(0,0,0,.25), rgba(0,0,0,0));}
   .ticker-wrap::after{bottom:0; background: linear-gradient(to top, rgba(0,0,0,.25), rgba(0,0,0,0));}
@@ -46,27 +51,45 @@
     animation: scroll var(--velocidad) linear infinite;
   }
 
+  /* Duplicamos el contenido para un bucle sin cortes */
   .ticker > .group{display:flex; gap: var(--padX); align-items:center}
   .item{
-    display:flex; align-items:baseline; gap:10px;
-    line-height: 1; padding: 0 6px;
+    display:flex;
+    align-items:baseline;
+    gap:10px;
+    line-height: 1;
+    padding: 0 6px;
   }
   .label{
-    font-weight:600; letter-spacing:.2px;
-    color: var(--muted); text-transform: uppercase; font-size: 12px;
+    font-weight:600;
+    letter-spacing:.2px;
+    color: var(--muted);
+    text-transform: uppercase;
+    font-size: 12px;
   }
-  .value{ font-variant-numeric: tabular-nums; font-weight:700; font-size: 16px; }
+  .value{
+    font-variant-numeric: tabular-nums;
+    font-weight:700;
+    font-size: 16px;
+  }
   .delta{
-    font-size: 12px; padding: 2px 6px; border-radius: 999px;
-    background: rgba(124,196,255,.12); color: var(--accent);
+    font-size: 12px;
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: rgba(124,196,255,.12);
+    color: var(--accent);
   }
-  .sep{ opacity:.2; font-size:14px; }
+  .sep{
+    opacity:.2;
+    font-size:14px;
+  }
 
   @keyframes scroll{
     0%   { transform: translateX(0); }
-    100% { transform: translateX(-50%); } /* desplaza el ancho de un grupo */
+    100% { transform: translateX(-50%); } /* Se desplazará exactamente el ancho de un grupo */
   }
 
+  /* Responsivo */
   @media (max-width: 480px){
     :root { --alto: 36px; --padX: 16px; }
     .value{font-size:14px}
@@ -76,119 +99,55 @@
 </head>
 <body>
   <div class="ticker-wrap" role="region" aria-label="Indicadores económicos de Chile">
-    <div id="ticker" class="ticker" aria-live="polite"></div>
+    <div id="ticker" class="ticker" aria-live="polite">
+      <!-- El JS insertará dos .group idénticos para el scroll infinito -->
+    </div>
   </div>
 
 <script>
 (async function(){
-  const endpoint = "https://mindicador.cl/api";
-
-  /* ======= Config por parámetros de URL (opcional) =======
-     Puedes pasar en el src del iframe:
-       ?alto=40&pxs=10&bg=%230b1220&fg=%23e6edf6&muted=%239fb0c7&accent=%237cc4ff
-     - alto: px de altura
-     - pxs: velocidad en px/seg (ajusta duración automáticamente)
-  */
-  const params = new URLSearchParams(location.search);
-  const altoParam   = params.get('alto');
-  const pxsParam    = params.get('pxs'); // px por segundo
-  const bgParam     = params.get('bg');
-  const fgParam     = params.get('fg');
-  const mutedParam  = params.get('muted');
-  const accentParam = params.get('accent');
-
-  if(altoParam)  document.documentElement.style.setProperty('--alto', `${parseInt(altoParam,10)}px`);
-  if(bgParam)    document.documentElement.style.setProperty('--bg', bgParam);
-  if(fgParam)    document.documentElement.style.setProperty('--fg', fgParam);
-  if(mutedParam) document.documentElement.style.setProperty('--muted', mutedParam);
-  if(accentParam)document.documentElement.style.setProperty('--accent', accentParam);
-
-  /* ======= Fallbacks por si API falla ======= */
+  const endpoint = "https://mindicador.cl/api"; // API pública
   const fallback = {
-    uf:   { label:'UF',   value: 36000, unidad:'CLP', date: new Date() },
-    usd:  { label:'DÓLAR',value: 950,   unidad:'CLP', date: new Date() },
-    eur:  { label:'EURO', value: 1020,  unidad:'CLP', date: new Date() },
-    utm:  { label:'UTM',  value: 65000, unidad:'CLP', date: new Date() },
-    ipcM: { label:'IPC',  value: 0.4,   unidad:'%',   date: new Date(), formatted:true },
-    ipcY: { label:'IPC 12M', value: 4.5, unidad:'%',  date: new Date(), formatted:true },
-    tpm:  { label:'TPM',  value: 6.00,  unidad:'%',   date: new Date(), formatted:true }
+    uf:       { nombre:"UF",      valor: 36000, unidad:"CLP" },
+    dolar:    { nombre:"Dólar",   valor: 950,   unidad:"CLP" },
+    ipc:      { nombre:"IPC",     valor: 0.4,   unidad:"%" }
   };
 
   function fmtCLP(n){
     try { return n.toLocaleString('es-CL', { style:'currency', currency:'CLP', maximumFractionDigits:0 }); }
     catch{ return `$${Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g,'.')}`; }
   }
-  function fmtPct(n){
-    const num = Number(n);
-    if (!isFinite(num)) return '';
-    return (num.toFixed(2).replace('.',',')) + '%';
-  }
-  function dateStr(d){
-    try { return new Date(d).toLocaleDateString('es-CL'); }
-    catch { return ''; }
-  }
-
-  /* Extrae el valor más reciente de una serie */
-  function latestFromSerie(obj){
-    // La API moderna trae {serie:[{fecha,valor}, ...]} en orden descendente
-    const v = obj?.serie?.[0];
-    return v ? { valor: v.valor, fecha: v.fecha } : null;
-  }
-
-  /* Calcula IPC interanual con la misma serie: valor actual vs ~12 meses atrás */
-  function computeIPCYoY(serie){
-    if(!Array.isArray(serie) || serie.length === 0) return null;
-    const current = serie[0];
-    // Buscar el punto de hace ~12 meses (aprox 11-13 meses atrás)
-    const currDate = new Date(current.fecha);
-    let best = null, bestDiff = Infinity;
-    for (let i=1; i<serie.length; i++){
-      const d = new Date(serie[i].fecha);
-      const monthsApart = Math.abs((currDate.getFullYear()-d.getFullYear())*12 + (currDate.getMonth()-d.getMonth()));
-      if (monthsApart >= 11 && monthsApart <= 13){
-        const diff = Math.abs(monthsApart-12);
-        if (diff < bestDiff){ bestDiff = diff; best = serie[i]; }
-        if (diff === 0) break;
-      }
-    }
-    if (!best || !isFinite(current.valor) || !isFinite(best.valor) || best.valor === 0) return null;
-    const yoy = ((current.valor / best.valor) - 1) * 100;
-    return { valor: yoy, fecha: current.fecha };
-  }
+  function fmtPct(n){ return (Number(n).toFixed(2).replace('.',',')) + '%' }
 
   function buildItems(data){
     const items = [];
+
     // UF
     if(data.uf){
-      items.push({ label:'UF', value: fmtCLP(data.uf.valor), delta: dateStr(data.uf.fecha) });
+      items.push({
+        label: 'UF',
+        value: fmtCLP(data.uf.valor),
+        delta: data.uf.fecha ? new Date(data.uf.fecha).toLocaleDateString('es-CL') : ''
+      });
     }
     // Dólar
-    if(data.usd){
-      items.push({ label:'DÓLAR', value: fmtCLP(data.usd.valor), delta: dateStr(data.usd.fecha) });
+    if(data.dolar){
+      items.push({
+        label: 'DÓLAR',
+        value: fmtCLP(data.dolar.valor),
+        delta: data.dolar.fecha ? new Date(data.dolar.fecha).toLocaleDateString('es-CL') : ''
+      });
     }
-    // Euro
-    if(data.eur){
-      items.push({ label:'EURO', value: fmtCLP(data.eur.valor), delta: dateStr(data.eur.fecha) });
+    // IPC (variación mensual)
+    if(data.ipc){
+      items.push({
+        label: 'IPC',
+        value: fmtPct(data.ipc.serie?.[0]?.valor ?? data.ipc.valor ?? 0),
+        delta: data.ipc.serie?.[0]?.fecha ? new Date(data.ipc.serie[0].fecha).toLocaleDateString('es-CL') : ''
+      });
     }
-    // UTM
-    if(data.utm){
-      items.push({ label:'UTM', value: fmtCLP(data.utm.valor), delta: dateStr(data.utm.fecha) });
-    }
-    // IPC mensual
-    if(data.ipcM){
-      const v = data.ipcM.formatted ? data.ipcM.value : data.ipcM.valor;
-      items.push({ label:'IPC', value: data.ipcM.formatted ? fmtPct(v) : fmtPct(v), delta: dateStr(data.ipcM.fecha) });
-    }
-    // IPC 12 meses
-    if(data.ipcY){
-      const v = data.ipcY.formatted ? data.ipcY.value : data.ipcY.valor;
-      items.push({ label:'IPC 12M', value: data.ipcY.formatted ? fmtPct(v) : fmtPct(v), delta: dateStr(data.ipcY.fecha) });
-    }
-    // TPM
-    if(data.tpm){
-      const v = data.tpm.formatted ? data.tpm.value : data.tpm.valor;
-      items.push({ label:'TPM', value: data.tpm.formatted ? fmtPct(v) : fmtPct(v), delta: dateStr(data.tpm.fecha) });
-    }
+
+    // Puedes añadir más: euro, utm, tpm, etc. siguiendo el mismo patrón.
 
     return items;
   }
@@ -214,38 +173,25 @@
     // Duplicamos el grupo para scroll continuo
     ticker.innerHTML = groupHTML() + groupHTML();
 
-    // Ajuste de duración según ancho total o por parámetro px/seg
+    // Ajuste de velocidad según contenido (opcional)
+    // Si el texto es muy largo, aumentamos duración para que sea más legible
     const totalWidth = ticker.scrollWidth / 2; // ancho de un grupo
-    const pxPerSec = pxsParam ? Math.max(4, Number(pxsParam)) : 10; // default 10 px/s
-    const duration = Math.max(18, Math.round(totalWidth / pxPerSec));
+    const pxPerSec = 10; // 10px/seg aprox
+    const duration = Math.max(20, Math.round(totalWidth / pxPerSec));
     ticker.style.animationDuration = duration + 's';
   }
 
   async function load(){
-    let data = null;
+    let data;
     try{
       const res = await fetch(endpoint, { cache: "no-store" });
       if(!res.ok) throw new Error(res.statusText);
       const json = await res.json();
-
-      const uf  = latestFromSerie(json.uf);
-      const usd = latestFromSerie(json.dolar);
-      const eur = latestFromSerie(json.euro);
-      const utm = latestFromSerie(json.utm);
-      const tpm = latestFromSerie(json.tpm);
-
-      // IPC mensual: el dato "ipc" viene como serie (% mensual)
-      const ipcSerie = json.ipc?.serie || [];
-      const ipcM = ipcSerie[0] ? { valor: ipcSerie[0].valor, fecha: ipcSerie[0].fecha } : null;
-
-      // IPC 12M (interanual) calculado
-      const ipcYcalc = computeIPCYoY(ipcSerie);
-
+      // La API devuelve objetos por indicador; para IPC trae "serie" con últimos valores
       data = {
-        uf, usd, eur, utm,
-        ipcM: ipcM ? { valor: ipcM.valor, fecha: ipcM.fecha } : null,
-        ipcY: ipcYcalc ? { valor: ipcYcalc.valor, fecha: ipcYcalc.fecha } : null,
-        tpm: tpm ? { valor: tpm.valor, fecha: tpm.fecha, formatted:true } : null // tpm ya viene como %
+        uf: json.uf ? { valor: json.uf.valor, fecha: json.uf.fecha } : null,
+        dolar: json.dolar ? { valor: json.dolar.valor, fecha: json.dolar.fecha } : null,
+        ipc: json.ipc ? { serie: json.ipc.serie } : null
       };
     }catch(e){
       console.warn('Fallo al cargar API, usando valores de respaldo:', e);
@@ -256,23 +202,10 @@
     renderTicker(items);
   }
 
-  // Carga en cada apertura/recarga de la página
-  await load();
+  load();
 
-  // Refresca cada 3 horas
-  const THREE_HOURS = 3 * 60 * 60 * 1000;
-  setInterval(load, THREE_HOURS);
-
-  // Si la pestaña vuelve a estar visible, vuelve a cargar
-  document.addEventListener('visibilitychange', ()=>{
-    if (!document.hidden) load();
-  });
-
-  // Pausa al pasar el mouse (opcional, descomenta si lo quieres)
-  // const wrap = document.querySelector('.ticker-wrap');
-  // wrap.addEventListener('mouseenter', ()=>{ document.getElementById('ticker').style.animationPlayState='paused'; });
-  // wrap.addEventListener('mouseleave', ()=>{ document.getElementById('ticker').style.animationPlayState='running'; });
-
+  // Refresca cada 6 horas (ajusta si prefieres)
+  setInterval(load, 6 * 60 * 60 * 1000);
 })();
 </script>
 </body>
