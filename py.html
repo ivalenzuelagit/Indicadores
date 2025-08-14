@@ -1,1 +1,289 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Ticker Indicadores Paraguay</title>
+<style>
+  :root{
+    --alto: 40px;          /* Altura visible del ticker (px) */
+    --velocidad: 35s;      /* Se recalcula automáticamente */
+    --padX: 24px;          /* Separación entre items */
+    --bg: #0b1220;         /* Fondo */
+    --fg: #e6edf6;         /* Texto principal */
+    --muted: #9fb0c7;      /* Texto secundario */
+    --accent: #7cc4ff;     /* Acento */
+    --dist: -300px;        /* Se sobrescribe en JS (= -ancho_del_grupo) */
+  }
 
+  html,body{margin:0;padding:0;background:transparent}
+  body{font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans", "Helvetica Neue", sans-serif}
+
+  .ticker-wrap{
+    position: relative;
+    width: 100%;
+    height: var(--alto);
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--fg);
+  }
+  .ticker-wrap::before,
+  .ticker-wrap::after{
+    content:"";
+    position:absolute; left:0; right:0;
+    height:8px; pointer-events:none;
+  }
+  .ticker-wrap::before{top:0; background: linear-gradient(to bottom, rgba(0,0,0,.25), rgba(0,0,0,0));}
+  .ticker-wrap::after{bottom:0; background: linear-gradient(to top, rgba(0,0,0,.25), rgba(0,0,0,0));}
+
+  .ticker{
+    position:absolute;
+    display:flex;
+    gap: var(--padX);
+    white-space: nowrap;
+    will-change: transform;
+    align-items:center;
+    height: 100%;
+    animation: scroll var(--velocidad) linear infinite;
+  }
+  .ticker > .group{display:flex; gap: var(--padX); align-items:center}
+
+  .item{
+    display:flex; align-items:baseline; gap:10px;
+    line-height:1; padding: 0 6px;
+  }
+  .label{
+    font-weight:600; letter-spacing:.2px;
+    color: var(--muted); text-transform: uppercase; font-size: 12px;
+  }
+  .value{ font-variant-numeric: tabular-nums; font-weight:700; font-size: 16px; }
+  .delta{
+    font-size: 12px; padding: 2px 6px; border-radius: 999px;
+    background: rgba(124,196,255,.12); color: var(--accent);
+  }
+  .sep{ opacity:.2; font-size:14px; }
+
+  @keyframes scroll{
+    0%   { transform: translateX(0); }
+    100% { transform: translateX(var(--dist)); } /* distancia = -ancho_del_grupo */
+  }
+
+  @media (max-width: 480px){
+    :root { --alto: 36px; --padX: 16px; }
+    .value{font-size:14px}
+    .label{font-size:11px}
+  }
+</style>
+</head>
+<body>
+  <div class="ticker-wrap" role="region" aria-label="Indicadores económicos de Paraguay">
+    <div id="ticker" class="ticker" aria-live="polite"></div>
+  </div>
+
+<script>
+(async function(){
+  /* =======================
+     Personalización por URL
+     =======================
+     ?alto=40&pxs=12&bg=%230b1220&fg=%23e6edf6&muted=%239fb0c7&accent=%237cc4ff
+     Parámetros manuales (si bloquean APIs):
+       &ipc=0.4     (IPC mensual, %)
+       &ipc12=4.0   (IPC 12 meses, %)
+       &tpm=6.25    (TPM, %)
+  */
+  const P = new URLSearchParams(location.search);
+  const alto   = P.get('alto');    if(alto)   document.documentElement.style.setProperty('--alto', `${parseInt(alto,10)}px`);
+  const bg     = P.get('bg');      if(bg)     document.documentElement.style.setProperty('--bg', bg);
+  const fg     = P.get('fg');      if(fg)     document.documentElement.style.setProperty('--fg', fg);
+  const muted  = P.get('muted');   if(muted)  document.documentElement.style.setProperty('--muted', muted);
+  const accent = P.get('accent');  if(accent) document.documentElement.style.setProperty('--accent', accent);
+
+  /* ===== Helpers ===== */
+  function fmtPYG(n){
+    const num = Number(n);
+    try { return num.toLocaleString('es-PY', { style:'currency', currency:'PYG', maximumFractionDigits:0 }); }
+    catch{ return `₲ ${Math.round(num).toString().replace(/\B(?=(\d{3})+(?!\d))/g,'.')}`; }
+  }
+  function fmtPct(n){
+    const num = Number(n);
+    if(!isFinite(num)) return '';
+    return (num.toFixed(2).replace('.',',')) + '%';
+  }
+  function dateStr(d){
+    if(!d) return '';
+    const tryDate = new Date(d);
+    if (!isNaN(tryDate)) return tryDate.toLocaleDateString('es-PY', { year:'numeric', month:'short' });
+    return String(d);
+  }
+
+  /* ===== Fuentes =====
+     1) USD/PYG – open.er-api.com (base USD, devuelve rates incluido PYG)
+     2) EUR/USD – BCE (ECB) para calcular EUR/PYG = EURUSD * USDPYG
+     (IPC, IPC 12M, TPM: opcionales por parámetros por ahora)
+  */
+  async function fetchUSDPYG(){
+    // Respuesta: { base_code:"USD", rates:{ PYG: xxxx, ... }, time_last_update_utc: "..." }
+    const url = 'https://open.er-api.com/v6/latest/USD';
+    const r = await fetch(url, { cache:'no-store' });
+    if(!r.ok) throw new Error('ER-API error');
+    const j = await r.json();
+    const pyg = j?.rates?.PYG;
+    if(!isFinite(pyg)) throw new Error('No PYG rate');
+    const fecha = j?.time_last_update_utc || null;
+    return { valor: pyg, fecha };
+  }
+
+  async function fetchEURUSD(){
+    // EXR/D.USD.EUR.SP00.A -> USD por 1 EUR (última obs.)
+    const url = 'https://data-api.ecb.europa.eu/service/data/EXR/D.USD.EUR.SP00.A?lastNObservations=1&format=jsondata';
+    const r = await fetch(url, { cache:'no-store' });
+    if(!r.ok) throw new Error('ECB error');
+    const j = await r.json();
+    const series = j?.data?.dataSets?.[0]?.series?.['0:0:0:0:0'];
+    const obs = series?.observations;
+    const k = obs ? Object.keys(obs)[0] : null;
+    const valor = k ? Number(obs[k][0]) : NaN; // USD por EUR
+    const periods = j?.data?.structure?.dimensions?.observation?.[0]?.values;
+    const fecha = (periods && k) ? periods[Number(k)]?.id : null;
+    if(!isFinite(valor)) throw new Error('ECB parse');
+    return { valor, fecha };
+  }
+
+  /* ===== Construcción de filas ===== */
+  function buildRows(rows){
+    return rows.map((it,i)=>`
+      <div class="item" aria-label="${it.label} ${it.value}">
+        <span class="label">${it.label}</span>
+        <span class="value">${it.value}</span>
+        ${it.delta ? `<span class="delta">${it.delta}</span>` : ``}
+      </div>
+      ${i < rows.length-1 ? `<span class="sep">|</span>` : ``}
+    `).join('');
+  }
+
+  /* ===== Render: llenar todo el ancho y animar por distancia en px ===== */
+  function renderTicker(rows){
+    const ticker = document.getElementById('ticker');
+    const groupHTML = `<div class="group">${buildRows(rows)}</div>`;
+
+    // Medir ancho real del grupo
+    const sandbox = document.createElement('div');
+    sandbox.style.position = 'absolute';
+    sandbox.style.visibility = 'hidden';
+    sandbox.style.left = '-99999px';
+    sandbox.innerHTML = groupHTML;
+    document.body.appendChild(sandbox);
+    const groupWidth = Math.max(1, sandbox.firstElementChild.scrollWidth);
+    document.body.removeChild(sandbox);
+
+    // Repetir para cubrir ≥ 2× el viewport (flujo continuo y arranca lleno)
+    const wrap = document.querySelector('.ticker-wrap');
+    const viewportWidth = wrap?.clientWidth || window.innerWidth;
+    const repeatsNeeded = Math.max(3, Math.ceil((viewportWidth * 2) / groupWidth) + 1);
+
+    let content = '';
+    for(let i=0; i<repeatsNeeded; i++){ content += groupHTML; }
+    ticker.innerHTML = content;
+
+    // Distancia = ancho de 1 grupo (negativa)
+    document.documentElement.style.setProperty('--dist', `-${groupWidth}px`);
+
+    // Duración = ancho_del_grupo / (px/seg)
+    const pxPerSec = P.get('pxs') ? Math.max(4, Number(P.get('pxs'))) : 10; // 10 px/s por defecto
+    const duration = Math.max(18, Math.round(groupWidth / pxPerSec));
+    ticker.style.animationDuration = duration + 's';
+  }
+
+  /* ===== Fallback ===== */
+  const fallbackRows = [
+    { label:'USD/PYG', value: fmtPYG(7500), delta:'—' },
+    { label:'EUR/PYG', value: fmtPYG(8200), delta:'—' }
+    // IPC, IPC 12M, TPM se añaden si pasas parámetros
+  ];
+
+  /* ===== Carga ===== */
+  let cachedRows = fallbackRows;
+
+  async function loadData(){
+    let usdPyg = null, usdDate = null, eurUsd = null, eurDate = null;
+
+    // 1) USD/PYG
+    try{
+      const usdp = await fetchUSDPYG();
+      usdPyg = usdp.valor; usdDate = usdp.fecha;
+    }catch(e){ console.warn('USD/PYG no disponible', e); }
+
+    // 2) EUR/USD → EUR/PYG
+    try{
+      const eur = await fetchEURUSD();
+      eurUsd = eur.valor; eurDate = eur.fecha;
+    }catch(e){ console.warn('ECB EUR/USD no disponible', e); }
+
+    // 3) Parámetros manuales de IPC y TPM
+    const ipc   = P.get('ipc')   != null ? Number(P.get('ipc'))   : null;
+    const ipc12 = P.get('ipc12') != null ? Number(P.get('ipc12')) : null;
+    const tpm   = P.get('tpm')   != null ? Number(P.get('tpm'))   : null;
+
+    const rows = [];
+
+    if(usdPyg != null){
+      rows.push({ label:'USD/PYG', value: fmtPYG(usdPyg), delta: dateStr(usdDate) });
+    }else{
+      rows.push(fallbackRows[0]);
+    }
+
+    if(usdPyg != null && eurUsd != null){
+      const eurPyg = eurUsd * usdPyg; // PYG por EUR
+      rows.push({ label:'EUR/PYG', value: fmtPYG(eurPyg), delta: dateStr(eurDate) });
+    }else{
+      rows.push(fallbackRows[1]);
+    }
+
+    if(isFinite(ipc)){
+      rows.push({ label:'IPC', value: fmtPct(ipc), delta: '' });
+    }
+    if(isFinite(ipc12)){
+      rows.push({ label:'IPC 12M', value: fmtPct(ipc12), delta: '' });
+    }
+    if(isFinite(tpm)){
+      rows.push({ label:'TPM', value: fmtPct(tpm), delta: '' });
+    }
+
+    cachedRows = rows.filter(Boolean);
+    if(cachedRows.length === 0) cachedRows = fallbackRows;
+  }
+
+  async function loadAndRender(){
+    if (cachedRows === fallbackRows) { await loadData(); }
+    renderTicker(cachedRows);
+  }
+
+  await loadAndRender();
+
+  // Refresca cada 3 horas; re-render al volver visible y al redimensionar
+  const THREE_HOURS = 3 * 60 * 60 * 1000;
+  setInterval(async ()=>{ await loadData(); renderTicker(cachedRows); }, THREE_HOURS);
+  document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) renderTicker(cachedRows); });
+
+  let resizeTimer = null;
+  window.addEventListener('resize', ()=>{
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(()=>renderTicker(cachedRows), 200);
+  });
+
+  /* ==============================
+     Ejemplos de uso del iframe
+     ==============================
+     1) Todo automático (USD/PYG + EUR/PYG):
+        .../ticker-py.html?alto=40&pxs=12
+
+     2) Con IPC, IPC 12M y TPM por parámetros:
+        .../ticker-py.html?alto=40&pxs=12&ipc=0.40&ipc12=4.00&tpm=6.25
+
+     3) Cambiar colores:
+        .../ticker-py.html?alto=40&pxs=12&bg=%231a1d29&fg=%23ffffff&muted=%2390a4b7&accent=%23ffd166
+  */
+})();
+</script>
+</body>
+</html>
