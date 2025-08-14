@@ -7,7 +7,7 @@
 <style>
   :root{
     --alto: 40px;          /* Altura visible del ticker */
-    --velocidad: 35s;      /* Duración del loop (↑ más lento) */
+    --velocidad: 35s;      /* Valor inicial; se recalcula según ancho */
     --padX: 24px;          /* Separación entre items */
     --bg: #0b1220;         /* Fondo */
     --fg: #e6edf6;         /* Texto principal */
@@ -16,19 +16,61 @@
   }
   html,body{margin:0;padding:0;background:transparent}
   body{font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans", "Helvetica Neue", sans-serif}
-  .ticker-wrap{position:relative;width:100%;height:var(--alto);overflow:hidden;background:var(--bg);color:var(--fg)}
-  .ticker-wrap::before,.ticker-wrap::after{content:"";position:absolute;left:0;right:0;height:8px;pointer-events:none}
-  .ticker-wrap::before{top:0;background:linear-gradient(to bottom, rgba(0,0,0,.25), rgba(0,0,0,0))}
-  .ticker-wrap::after{bottom:0;background:linear-gradient(to top, rgba(0,0,0,.25), rgba(0,0,0,0))}
-  .ticker{position:absolute;display:flex;gap:var(--padX);white-space:nowrap;will-change:transform;align-items:center;height:100%;animation:scroll var(--velocidad) linear infinite}
-  .ticker>.group{display:flex;gap:var(--padX);align-items:center}
-  .item{display:flex;align-items:baseline;gap:10px;line-height:1;padding:0 6px}
-  .label{font-weight:600;letter-spacing:.2px;color:var(--muted);text-transform:uppercase;font-size:12px}
-  .value{font-variant-numeric:tabular-nums;font-weight:700;font-size:16px}
-  .delta{font-size:12px;padding:2px 6px;border-radius:999px;background:rgba(124,196,255,.12);color:var(--accent)}
-  .sep{opacity:.2;font-size:14px}
-  @keyframes scroll{0%{transform:translateX(0)}100%{transform:translateX(-50%)}}
-  @media (max-width:480px){:root{--alto:36px;--padX:16px}.value{font-size:14px}.label{font-size:11px}}
+
+  .ticker-wrap{
+    position: relative;
+    width: 100%;
+    height: var(--alto);
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--fg);
+  }
+  .ticker-wrap::before,
+  .ticker-wrap::after{
+    content:"";
+    position:absolute; left:0; right:0;
+    height:8px; pointer-events:none;
+  }
+  .ticker-wrap::before{top:0; background: linear-gradient(to bottom, rgba(0,0,0,.25), rgba(0,0,0,0));}
+  .ticker-wrap::after{bottom:0; background: linear-gradient(to top, rgba(0,0,0,.25), rgba(0,0,0,0));}
+
+  .ticker{
+    position:absolute;
+    display:flex;
+    gap: var(--padX);
+    white-space: nowrap;
+    will-change: transform;
+    align-items:center;
+    height: 100%;
+    animation: scroll var(--velocidad) linear infinite;
+  }
+  .ticker > .group{display:flex; gap: var(--padX); align-items:center}
+
+  .item{
+    display:flex; align-items:baseline; gap:10px;
+    line-height:1; padding: 0 6px;
+  }
+  .label{
+    font-weight:600; letter-spacing:.2px;
+    color: var(--muted); text-transform: uppercase; font-size: 12px;
+  }
+  .value{ font-variant-numeric: tabular-nums; font-weight:700; font-size: 16px; }
+  .delta{
+    font-size: 12px; padding: 2px 6px; border-radius: 999px;
+    background: rgba(124,196,255,.12); color: var(--accent);
+  }
+  .sep{ opacity:.2; font-size:14px; }
+
+  @keyframes scroll{
+    0%   { transform: translateX(0); }
+    100% { transform: translateX(-50%); } /* se recalcula la duración según ancho */
+  }
+
+  @media (max-width: 480px){
+    :root { --alto: 36px; --padX: 16px; }
+    .value{font-size:14px}
+    .label{font-size:11px}
+  }
 </style>
 </head>
 <body>
@@ -48,7 +90,7 @@
   const muted  = P.get('muted');   if(muted)  document.documentElement.style.setProperty('--muted', muted);
   const accent = P.get('accent');  if(accent) document.documentElement.style.setProperty('--accent', accent);
 
-  // ========= Helpers formato =========
+  /* ====== Helpers de formato ====== */
   function fmtCOP(n){
     const num = Number(n);
     try { return num.toLocaleString('es-CO', { style:'currency', currency:'COP', maximumFractionDigits:0 }); }
@@ -61,13 +103,16 @@
   }
   function dateStr(d){
     if(!d) return '';
-    try { return new Date(d).toLocaleDateString('es-CO'); }
-    catch { return String(d); }
+    const tryDate = new Date(d);
+    if (!isNaN(tryDate)) return tryDate.toLocaleDateString('es-CO');
+    return String(d);
   }
 
-  // ========= Fuentes =========
-  // 1) TRM (USD/COP) – Socrata (Datos Abiertos Colombia)
-  // Dataset TRM: 32sa-8pi3 (o "TRM" ceyp-9c7c). Usamos /resource con heurística de campos.
+  /* ====== Fuentes ======
+     1) TRM (USD/COP) – Datos Abiertos Colombia (Socrata)
+        Usamos dos datasets alternativos y detectamos sus campos por heurística.
+     2) EUR→USD – ECB (para obtener EURUSD y calcular EUR/COP = EURUSD * USDCOP)
+  */
   async function fetchTRM(){
     const endpoints = [
       'https://www.datos.gov.co/resource/32sa-8pi3.json?$limit=1&$order=vigenciadesde%20DESC',
@@ -81,38 +126,35 @@
         const row = Array.isArray(arr) && arr[0] ? arr[0] : null;
         if(!row) continue;
 
-        // heurística de campos
         const keys = Object.keys(row);
-        const valKey = keys.find(k => /^valor$/i.test(k)) || keys.find(k => /trm|tasa|valor/i.test(k));
+        const valKey  = keys.find(k => /^valor$/i.test(k)) || keys.find(k => /trm|tasa|valor/i.test(k));
         const dateKey = keys.find(k => /(fecha|vigenciadesde|vigenciahasta|periodo)/i.test(k));
 
         const valor = Number(row[valKey]);
         const fecha = row[dateKey];
         if(isFinite(valor)) return { valor, fecha };
-      }catch(e){ /* intenta el siguiente */ }
+      }catch(e){ /* probar siguiente endpoint */ }
     }
     throw new Error('No se pudo obtener TRM');
   }
 
-  // 2) EUR→USD (ECB SDMX) para calcular EUR/COP = (EURUSD) * (USDCOP)
   async function fetchEURUSD(){
-    // Serie: EXR/D.USD.EUR.SP00.A -> USD por EUR (diario, spot, average)
+    // Serie: EXR/D.USD.EUR.SP00.A -> USD por EUR (última observación)
     const url = 'https://data-api.ecb.europa.eu/service/data/EXR/D.USD.EUR.SP00.A?lastNObservations=1&format=jsondata';
     const r = await fetch(url, { cache: 'no-store' });
     if(!r.ok) throw new Error('ECB error');
     const j = await r.json();
-    // Navegar SDMX JSON compact
-    const obs = j?.data?.dataSets?.[0]?.series?.['0:0:0:0:0']?.observations;
+    const series = j?.data?.dataSets?.[0]?.series?.['0:0:0:0:0'];
+    const obs = series?.observations;
     const firstKey = obs ? Object.keys(obs)[0] : null;
     const valor = firstKey ? Number(obs[firstKey][0]) : NaN;
-    // Fecha
     const timePeriods = j?.data?.structure?.dimensions?.observation?.[0]?.values;
     const fecha = (timePeriods && firstKey) ? timePeriods[Number(firstKey)]?.id : null;
     if(!isFinite(valor)) throw new Error('ECB parse');
     return { valor, fecha }; // USD por 1 EUR
   }
 
-  // ======= Render =======
+  /* ====== Construcción de filas ====== */
   function buildRows(rows){
     return rows.map((it,i)=>`
       <div class="item" aria-label="${it.label} ${it.value}">
@@ -124,47 +166,74 @@
     `).join('');
   }
 
+  /* ====== Render con repetición dinámica para llenar todo el ancho ====== */
   function renderTicker(rows){
     const ticker = document.getElementById('ticker');
-    const group = `<div class="group">${buildRows(rows)}</div>`;
-    ticker.innerHTML = group + group;
+    const groupHTML = `<div class="group">${buildRows(rows)}</div>`;
 
-    const totalWidth = ticker.scrollWidth / 2;
-    const pxPerSec = P.get('pxs') ? Math.max(4, Number(P.get('pxs'))) : 10; // 10 px/s
-    const duration = Math.max(18, Math.round(totalWidth / pxPerSec));
+    // Medir ancho de un grupo "offline"
+    const temp = document.createElement('div');
+    temp.style.position = 'absolute';
+    temp.style.visibility = 'hidden';
+    temp.innerHTML = groupHTML;
+    document.body.appendChild(temp);
+    const groupWidth = temp.firstElementChild.scrollWidth || 1; // evitar división por 0
+    document.body.removeChild(temp);
+
+    const viewportWidth = document.querySelector('.ticker-wrap').clientWidth || window.innerWidth;
+    const repeatsNeeded = Math.max(2, Math.ceil(viewportWidth / groupWidth) + 1);
+
+    let content = '';
+    for(let i=0; i<repeatsNeeded; i++){
+      content += groupHTML;
+    }
+    ticker.innerHTML = content;
+
+    // Ajustar duración de animación según ancho de un grupo y velocidad deseada
+    const pxPerSec = P.get('pxs') ? Math.max(4, Number(P.get('pxs'))) : 10; // 10 px/s por defecto
+    const duration = Math.max(18, Math.round(groupWidth / pxPerSec));
     ticker.style.animationDuration = duration + 's';
   }
 
-  // ======= Carga =======
+  /* ====== Fallbacks ====== */
   const fallbackRows = [
     { label:'USD/COP', value: fmtCOP(4100), delta:'—' },
     { label:'EUR/COP', value: fmtCOP(4500), delta:'—' }
-    // Puedes agregar aquí IPC y TPM fijos si lo deseas
   ];
 
-  async function load(){
+  /* ====== Carga y refresco ====== */
+  async function loadAndRender(){
     try{
       const [trm, eurusd] = await Promise.all([fetchTRM(), fetchEURUSD()]);
-      const usdCop = trm.valor;                       // TRM (COP por USD)
-      const eurUsd = eurusd.valor;                    // USD por EUR
-      const eurCop = eurUsd * usdCop;                 // COP por EUR
+      const usdCop = trm.valor;                   // COP por USD
+      const eurUsd = eurusd.valor;                // USD por EUR
+      const eurCop = eurUsd * usdCop;             // COP por EUR
+
       const rows = [
         { label:'USD/COP', value: fmtCOP(usdCop), delta: dateStr(trm.fecha) },
         { label:'EUR/COP', value: fmtCOP(eurCop), delta: eurusd.fecha || '' }
       ];
 
-      renderTicker(rows);
+      renderTicker(rows.length ? rows : fallbackRows);
     }catch(e){
       console.warn('Fallo al cargar APIs, usando fallback:', e);
       renderTicker(fallbackRows);
     }
   }
 
-  await load();
+  await loadAndRender();
 
   // Refresca cada 3 horas y al volver la pestaña visible
-  setInterval(load, 3 * 60 * 60 * 1000);
-  document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) load(); });
+  const THREE_HOURS = 3 * 60 * 60 * 1000;
+  setInterval(loadAndRender, THREE_HOURS);
+  document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) loadAndRender(); });
+
+  // Recalcular al redimensionar (debounce)
+  let resizeTimer = null;
+  window.addEventListener('resize', ()=>{
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(loadAndRender, 200);
+  });
 
   // (Opcional) Pausa al hover:
   // const wrap = document.querySelector('.ticker-wrap');
