@@ -6,14 +6,14 @@
 <title>Ticker Indicadores Colombia</title>
 <style>
   :root{
-    --alto: 40px;          /* Altura visible del ticker (ajusta) */
+    --alto: 40px;          /* Altura visible del ticker */
     --velocidad: 35s;      /* Se recalcula automáticamente */
     --padX: 24px;          /* Separación entre items */
     --bg: #0b1220;         /* Fondo */
     --fg: #e6edf6;         /* Texto principal */
     --muted: #9fb0c7;      /* Texto secundario */
     --accent: #7cc4ff;     /* Acento */
-    --dist: -300px;        /* Se sobrescribe en JS: distancia a desplazar = -ancho_del_grupo */
+    --dist: -300px;        /* Se sobrescribe en JS con el ancho del grupo */
   }
 
   html,body{margin:0;padding:0;background:transparent}
@@ -63,10 +63,9 @@
   }
   .sep{ opacity:.2; font-size:14px; }
 
-  /* La animación usa una distancia en píxeles (—ancho_del_grupo) */
   @keyframes scroll{
     0%   { transform: translateX(0); }
-    100% { transform: translateX(var(--dist)); }
+    100% { transform: translateX(var(--dist)); } /* distancia en px (ancho del grupo) */
   }
 
   @media (max-width: 480px){
@@ -83,10 +82,13 @@
 
 <script>
 (async function(){
-  /* ====== Personalización por URL ======
+  /* =======================
+     Personalización por URL
+     =======================
      ?alto=40&pxs=12&bg=%230b1220&fg=%23e6edf6&muted=%239fb0c7&accent=%237cc4ff
-     - alto: px de altura
-     - pxs: velocidad en px/seg (recalcula duración)
+     IPC automático (dataset DANE en datos.gov.co - Socrata):
+     &ipc_ds=ID&ipc_field_m=CAMPO_MENSUAL&ipc_field_y=CAMPO_12M&ipc_date=CAMPO_FECHA
+     IPC manual (si no hay dataset o políticas bloquean): &ipc=0.28&ipc12=6.12
   */
   const P = new URLSearchParams(location.search);
   const alto   = P.get('alto');    if(alto)   document.documentElement.style.setProperty('--alto', `${parseInt(alto,10)}px`);
@@ -95,22 +97,30 @@
   const muted  = P.get('muted');   if(muted)  document.documentElement.style.setProperty('--muted', muted);
   const accent = P.get('accent');  if(accent) document.documentElement.style.setProperty('--accent', accent);
 
-  /* ====== Helpers de formato ====== */
+  /* ===== Helpers formato ===== */
   function fmtCOP(n){
     const num = Number(n);
     try { return num.toLocaleString('es-CO', { style:'currency', currency:'COP', maximumFractionDigits:0 }); }
     catch{ return `COP ${Math.round(num).toString().replace(/\B(?=(\d{3})+(?!\d))/g,'.')}`; }
   }
+  function fmtPct(n){
+    const num = Number(n);
+    if(!isFinite(num)) return '';
+    return (num.toFixed(2).replace('.',',')) + '%';
+  }
   function dateStr(d){
     if(!d) return '';
     const tryDate = new Date(d);
-    if (!isNaN(tryDate)) return tryDate.toLocaleDateString('es-CO');
+    if (!isNaN(tryDate)) return tryDate.toLocaleDateString('es-CO', { year:'numeric', month:'short' });
     return String(d);
   }
 
-  /* ====== Fuentes ======
-     1) TRM (USD/COP) – Datos Abiertos Colombia (Socrata) (dos datasets fallback).
-     2) EUR→USD – BCE (para calcular EUR/COP = EURUSD * USDCOP)
+  /* ===== Fuentes =====
+     1) TRM (USD/COP) – Datos Abiertos Colombia (Socrata)
+        Intentamos dos datasets comunes y autodetectamos campos.
+     2) EUR→USD – BCE (ECB) (para calcular EUR/COP = EURUSD * USDCOP)
+     3) IPC – DANE (Socrata) si se provee el dataset ID y nombres de campo por URL.
+        Si no, permite setear por parámetros (?ipc & ?ipc12).
   */
   async function fetchTRM(){
     const endpoints = [
@@ -138,22 +148,47 @@
   }
 
   async function fetchEURUSD(){
-    // Serie: EXR/D.USD.EUR.SP00.A -> USD por EUR (1 EUR = X USD), última observación
+    // EXR/D.USD.EUR.SP00.A -> USD por EUR (última observación)
     const url = 'https://data-api.ecb.europa.eu/service/data/EXR/D.USD.EUR.SP00.A?lastNObservations=1&format=jsondata';
     const r = await fetch(url, { cache: 'no-store' });
     if(!r.ok) throw new Error('ECB error');
     const j = await r.json();
     const series = j?.data?.dataSets?.[0]?.series?.['0:0:0:0:0'];
     const obs = series?.observations;
-    const firstKey = obs ? Object.keys(obs)[0] : null;
-    const valor = firstKey ? Number(obs[firstKey][0]) : NaN;
-    const timePeriods = j?.data?.structure?.dimensions?.observation?.[0]?.values;
-    const fecha = (timePeriods && firstKey) ? timePeriods[Number(firstKey)]?.id : null;
+    const k = obs ? Object.keys(obs)[0] : null;
+    const valor = k ? Number(obs[k][0]) : NaN;
+    const periods = j?.data?.structure?.dimensions?.observation?.[0]?.values;
+    const fecha = (periods && k) ? periods[Number(k)]?.id : null;
     if(!isFinite(valor)) throw new Error('ECB parse');
     return { valor, fecha }; // USD por 1 EUR
   }
 
-  /* ====== Construcción de filas ====== */
+  async function fetchIPCFromSocrata(){
+    const ds   = P.get('ipc_ds');       // ID del dataset (ej: abcd-1234)
+    const fM   = P.get('ipc_field_m');  // nombre del campo "variación mensual"
+    const fY   = P.get('ipc_field_y');  // nombre del campo "variación 12M"
+    const fDt  = P.get('ipc_date');     // nombre del campo fecha/periodo (para ordenar)
+    if(!(ds && (fM || fY) && fDt)) return null; // no hay config → regresar null
+
+    const base = `https://www.datos.gov.co/resource/${encodeURIComponent(ds)}.json`;
+    // Ordenar por fecha/periodo descendente y tomar el último registro publicado
+    const url  = `${base}?$limit=1&$order=${encodeURIComponent(fDt)}%20DESC`;
+    const r = await fetch(url, { cache: 'no-store' });
+    if(!r.ok) throw new Error('IPC dataset error');
+    const arr = await r.json();
+    const row = Array.isArray(arr) && arr[0] ? arr[0] : null;
+    if(!row) return null;
+
+    const vM = fM ? Number(row[fM]) : null;
+    const vY = fY ? Number(row[fY]) : null;
+    const dt = row[fDt];
+    return {
+      m: isFinite(vM) ? { valor: vM, fecha: dt } : null,
+      y: isFinite(vY) ? { valor: vY, fecha: dt } : null
+    };
+  }
+
+  /* ===== Construcción de filas ===== */
   function buildRows(rows){
     return rows.map((it,i)=>`
       <div class="item" aria-label="${it.label} ${it.value}">
@@ -165,12 +200,12 @@
     `).join('');
   }
 
-  /* ====== Render que llena todo el ancho y anima por distancia en px ====== */
+  /* ===== Render que llena todo el ancho y anima por distancia en px ===== */
   function renderTicker(rows){
     const ticker = document.getElementById('ticker');
     const groupHTML = `<div class="group">${buildRows(rows)}</div>`;
 
-    // Medir ancho real de un grupo con estilos aplicados
+    // Medir ancho real del grupo con estilos aplicados
     const sandbox = document.createElement('div');
     sandbox.style.position = 'absolute';
     sandbox.style.visibility = 'hidden';
@@ -191,7 +226,7 @@
     }
     ticker.innerHTML = content;
 
-    // Establecer distancia de animación = ancho de 1 grupo (en negativo)
+    // Distancia de animación = ancho de 1 grupo (en negativo)
     document.documentElement.style.setProperty('--dist', `-${groupWidth}px`);
 
     // Duración según velocidad deseada (px/s) y ancho del grupo
@@ -200,55 +235,106 @@
     ticker.style.animationDuration = duration + 's';
   }
 
-  /* ====== Fallbacks ====== */
+  /* ===== Fallback ===== */
   const fallbackRows = [
     { label:'USD/COP', value: fmtCOP(4100), delta:'—' },
     { label:'EUR/COP', value: fmtCOP(4500), delta:'—' }
   ];
 
-  /* ====== Carga y refresco ====== */
+  /* ===== Carga de datos ===== */
   let cachedRows = fallbackRows;
 
   async function loadData(){
+    // 1) USD/COP (TRM) y EUR/COP
+    let usdCop = null, trmDate = null, eurUsd = null, eurDate = null;
     try{
-      const [trm, eurusd] = await Promise.all([fetchTRM(), fetchEURUSD()]);
-      const usdCop = trm.valor;          // COP por USD (TRM)
-      const eurUsd = eurusd.valor;       // USD por EUR
-      const eurCop = eurUsd * usdCop;    // COP por EUR
-      cachedRows = [
-        { label:'USD/COP', value: fmtCOP(usdCop), delta: dateStr(trm.fecha) },
-        { label:'EUR/COP', value: fmtCOP(eurCop), delta: eurusd.fecha || '' }
-      ];
+      const [trm, ecb] = await Promise.all([fetchTRM(), fetchEURUSD()]);
+      usdCop  = trm.valor;  trmDate = trm.fecha;
+      eurUsd  = ecb.valor;  eurDate = ecb.fecha;
     }catch(e){
-      console.warn('Fallo al cargar APIs, usando fallback:', e);
-      cachedRows = fallbackRows;
+      console.warn('USD/EUR fuentes no disponibles, usando fallback', e);
     }
+
+    // 2) IPC (prioridad: dataset → parámetros)
+    let ipcM = null, ipcY = null, ipcDt = null;
+    try{
+      const ipc = await fetchIPCFromSocrata();
+      if(ipc){
+        if(ipc.m){ ipcM = ipc.m.valor; ipcDt = ipc.m.fecha; }
+        if(ipc.y){ ipcY = ipc.y.valor; ipcDt = ipcDt || ipc.y.fecha; }
+      }
+    }catch(e){
+      console.warn('IPC dataset no disponible', e);
+    }
+    // Si no hubo dataset o falló, usar parámetros (si existen)
+    if(ipcM == null && P.get('ipc') != null){
+      const v = Number(P.get('ipc')); if(isFinite(v)) ipcM = v;
+    }
+    if(ipcY == null && P.get('ipc12') != null){
+      const v = Number(P.get('ipc12')); if(isFinite(v)) ipcY = v;
+    }
+
+    const rows = [];
+
+    if(usdCop != null){
+      rows.push({ label:'USD/COP', value: fmtCOP(usdCop), delta: dateStr(trmDate) });
+    }else{
+      rows.push(fallbackRows[0]);
+    }
+
+    if(usdCop != null && eurUsd != null){
+      const eurCop = eurUsd * usdCop;
+      rows.push({ label:'EUR/COP', value: fmtCOP(eurCop), delta: dateStr(eurDate) });
+    }else{
+      rows.push(fallbackRows[1]);
+    }
+
+    if(ipcM != null){
+      rows.push({ label:'IPC', value: fmtPct(ipcM), delta: dateStr(ipcDt) });
+    }
+    if(ipcY != null){
+      rows.push({ label:'IPC 12M', value: fmtPct(ipcY), delta: dateStr(ipcDt) });
+    }
+
+    cachedRows = rows.filter(Boolean);
+    if(cachedRows.length === 0) cachedRows = fallbackRows;
   }
 
   async function loadAndRender(){
-    // Solo pedimos datos si aún no hay reales
     if (cachedRows === fallbackRows) { await loadData(); }
     renderTicker(cachedRows);
   }
 
   await loadAndRender();
 
-  // Refresca datos cada 3 horas y re-renderiza (también al volver a la pestaña)
+  // Refresco cada 3 horas y al volver visible / redimensionar
   const THREE_HOURS = 3 * 60 * 60 * 1000;
   setInterval(async ()=>{ await loadData(); renderTicker(cachedRows); }, THREE_HOURS);
   document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) renderTicker(cachedRows); });
 
-  // Recalcular al redimensionar (sin volver a pedir datos)
   let resizeTimer = null;
   window.addEventListener('resize', ()=>{
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(()=>renderTicker(cachedRows), 200);
   });
 
-  // (Opcional) Pausa al hover:
-  // const wrap = document.querySelector('.ticker-wrap');
-  // wrap.addEventListener('mouseenter', ()=>{ document.getElementById('ticker').style.animationPlayState='paused' });
-  // wrap.addEventListener('mouseleave', ()=>{ document.getElementById('ticker').style.animationPlayState='running' });
+  /* ==============================
+     Ejemplos de uso en el iframe:
+     ==============================
+     1) Solo TRM y EUR/COP:
+        .../ticker-co.html?alto=40&pxs=12
+
+     2) Con IPC por parámetros (mensual 0,28% y anual 6,12%):
+        .../ticker-co.html?alto=40&pxs=12&ipc=0.28&ipc12=6.12
+
+     3) Con IPC automático (dataset DANE en Socrata):
+        .../ticker-co.html?alto=40&pxs=12
+        &ipc_ds=ABCD-1234
+        &ipc_field_m=variacion_mensual
+        &ipc_field_y=variacion_anual
+        &ipc_date=periodo
+     (Reemplaza ABCD-1234 y los nombres de campo por los reales del dataset.)
+  */
 })();
 </script>
 </body>
