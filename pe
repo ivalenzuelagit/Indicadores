@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Ticker Indicadores Perú (BCRP)</title>
+<style>
+  :root{
+    --alto: 40px;          /* Altura visible del ticker */
+    --velocidad: 35s;      /* Duración del loop (↑ más lento) */
+    --padX: 24px;          /* Separación entre items */
+    --bg: #0b1220;         /* Fondo */
+    --fg: #e6edf6;         /* Texto principal */
+    --muted: #9fb0c7;      /* Texto secundario */
+    --accent: #7cc4ff;     /* Acento */
+  }
+  html,body{margin:0;padding:0;background:transparent}
+  body{font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans", "Helvetica Neue", sans-serif}
+  .ticker-wrap{position:relative;width:100%;height:var(--alto);overflow:hidden;background:var(--bg);color:var(--fg)}
+  .ticker-wrap::before,.ticker-wrap::after{content:"";position:absolute;left:0;right:0;height:8px;pointer-events:none}
+  .ticker-wrap::before{top:0;background:linear-gradient(to bottom, rgba(0,0,0,.25), rgba(0,0,0,0))}
+  .ticker-wrap::after{bottom:0;background:linear-gradient(to top, rgba(0,0,0,.25), rgba(0,0,0,0))}
+  .ticker{position:absolute;display:flex;gap:var(--padX);white-space:nowrap;will-change:transform;align-items:center;height:100%;animation:scroll var(--velocidad) linear infinite}
+  .ticker>.group{display:flex;gap:var(--padX);align-items:center}
+  .item{display:flex;align-items:baseline;gap:10px;line-height:1;padding:0 6px}
+  .label{font-weight:600;letter-spacing:.2px;color:var(--muted);text-transform:uppercase;font-size:12px}
+  .value{font-variant-numeric:tabular-nums;font-weight:700;font-size:16px}
+  .delta{font-size:12px;padding:2px 6px;border-radius:999px;background:rgba(124,196,255,.12);color:var(--accent)}
+  .sep{opacity:.2;font-size:14px}
+  @keyframes scroll{0%{transform:translateX(0)}100%{transform:translateX(-50%)}}
+  @media (max-width:480px){:root{--alto:36px;--padX:16px}.value{font-size:14px}.label{font-size:11px}}
+</style>
+</head>
+<body>
+  <div class="ticker-wrap" role="region" aria-label="Indicadores económicos de Perú">
+    <div id="ticker" class="ticker" aria-live="polite"></div>
+  </div>
+
+<script>
+(async function(){
+  // Series del BCRP (códigos oficiales)
+  const SERIES = {
+    usd:  "PN01219PM", // Tipo de cambio USD - bancario promedio (mensual)
+    eur:  "PN01235PM", // Tipo de cambio Euro - promedio (mensual)
+    ipcm: "PN01271PM", // IPC Lima Metropolitana - variación % mensual
+    ipcy: "PN01273PM", // IPC Lima Metropolitana - variación % 12 meses
+    tpm:  "PD04722MM"  // Tasa de referencia de la política monetaria (mensual)
+  };
+
+  // Permite personalizar vía querystring (?alto=40&pxs=12&bg=%230b1220&fg=%23e6edf6...)
+  const P = new URLSearchParams(location.search);
+  const alto   = P.get('alto');    if(alto)   document.documentElement.style.setProperty('--alto', `${parseInt(alto,10)}px`);
+  const bg     = P.get('bg');      if(bg)     document.documentElement.style.setProperty('--bg', bg);
+  const fg     = P.get('fg');      if(fg)     document.documentElement.style.setProperty('--fg', fg);
+  const muted  = P.get('muted');   if(muted)  document.documentElement.style.setProperty('--muted', muted);
+  const accent = P.get('accent');  if(accent) document.documentElement.style.setProperty('--accent', accent);
+
+  function fmtPEN(n){
+    const num = Number(n);
+    try { return num.toLocaleString('es-PE', { style:'currency', currency:'PEN', maximumFractionDigits:4 }); }
+    catch{ return `S/ ${num.toFixed(4)}`.replace('.',','); }
+  }
+  function fmtPct(n){
+    const num = Number(n);
+    if (!isFinite(num)) return '';
+    return (num.toFixed(2).replace('.',',')) + '%';
+  }
+  function dateStrYYYYMM(d){
+    if(!d) return '';
+    // Las series del BCRP vienen como "Ene25", "2025-07", etc. El JSON incluye "periodo" y "fecha" según serie.
+    try{
+      const dt = new Date(d);
+      if(!isNaN(dt)) return dt.toLocaleDateString('es-PE', { year:'numeric', month:'short' });
+    }catch(e){}
+    return String(d);
+  }
+
+  // Llama al API del BCRP para varias series a la vez
+  async function fetchSeries(codes){
+    const base = "https://estadisticas.bcrp.gob.pe/estadisticas/series/api";
+    const url  = `${base}/${codes.join('-')}/json`;
+    const res  = await fetch(url, { cache: "no-store" });
+    if(!res.ok) throw new Error(res.statusText);
+    return res.json();
+  }
+
+  // Extrae el último dato de una serie BCRP (estructura JSON)
+  function latestFromBCRP(serie){
+    // Formato típico:
+    // { nombre, codigo, periodicidad, unidad, formato, fuente, data: [{periodo:"2025-07", valor:"3.54"} ...] }
+    const d = Array.isArray(serie?.data) ? serie.data : [];
+    if(!d.length) return null;
+    const x = d[d.length - 1]; // el último registro
+    const val = Number(x.valor);
+    return { valor: val, periodo: x.periodo, fecha: x.fecha || x.periodo || null, unidad: serie.unidad || '' };
+  }
+
+  function buildRows(lat){
+    const rows = [];
+
+    if(lat.usd) rows.push({ label:'USD/PEN',   value: fmtPEN(lat.usd.valor),  delta: dateStrYYYYMM(lat.usd.fecha) });
+    if(lat.eur) rows.push({ label:'EUR/PEN',   value: fmtPEN(lat.eur.valor),  delta: dateStrYYYYMM(lat.eur.fecha) });
+    if(lat.ipcm)rows.push({ label:'IPC',       value: fmtPct(lat.ipcm.valor), delta: dateStrYYYYMM(lat.ipcm.fecha) });
+    if(lat.ipcy)rows.push({ label:'IPC 12M',   value: fmtPct(lat.ipcy.valor), delta: dateStrYYYYMM(lat.ipcy.fecha) });
+    if(lat.tpm) rows.push({ label:'TPM',       value: fmtPct(lat.tpm.valor),  delta: dateStrYYYYMM(lat.tpm.fecha) });
+
+    return rows;
+  }
+
+  function renderTicker(rows){
+    const ticker = document.getElementById('ticker');
+    function groupHTML(){
+      return `
+        <div class="group">
+          ${rows.map((it,i)=>`
+            <div class="item" aria-label="${it.label} ${it.value}">
+              <span class="label">${it.label}</span>
+              <span class="value">${it.value}</span>
+              ${it.delta ? `<span class="delta">${it.delta}</span>` : ``}
+            </div>
+            ${i < rows.length-1 ? `<span class="sep">|</span>` : ``}
+          `).join('')}
+        </div>
+      `;
+    }
+    ticker.innerHTML = groupHTML() + groupHTML();
+
+    // Ajuste de velocidad según ancho total o parámetro pxs
+    const totalWidth = ticker.scrollWidth / 2;
+    const pxPerSec = P.get('pxs') ? Math.max(4, Number(P.get('pxs'))) : 10; // 10 px/s por defecto
+    const duration = Math.max(18, Math.round(totalWidth / pxPerSec));
+    ticker.style.animationDuration = duration + 's';
+  }
+
+  // Valores de respaldo por si el API falla (para no quedar en blanco)
+  const fallbackRows = [
+    { label:'USD/PEN', value: fmtPEN(3.55), delta:'—' },
+    { label:'EUR/PEN', value: fmtPEN(3.90), delta:'—' },
+    { label:'IPC',     value: fmtPct(0.20),  delta:'—' },
+    { label:'IPC 12M', value: fmtPct(3.00),  delta:'—' },
+    { label:'TPM',     value: fmtPct(4.75),  delta:'—' }
+  ];
+
+  async function load(){
+    try{
+      const json = await fetchSeries([SERIES.usd, SERIES.eur, SERIES.ipcm, SERIES.ipcy, SERIES.tpm]);
+      // json tiene { config:{}, series:[{codigo, data:[...]} ...] }
+      const map = {};
+      (json.series || []).forEach(s => { map[s.codigo] = latestFromBCRP(s); });
+
+      const latest = {
+        usd:  map[SERIES.usd],
+        eur:  map[SERIES.eur],
+        ipcm: map[SERIES.ipcm],
+        ipcy: map[SERIES.ipcy],
+        tpm:  map[SERIES.tpm]
+      };
+
+      const rows = buildRows(latest);
+      renderTicker(rows.length ? rows : fallbackRows);
+    }catch(e){
+      console.warn('Fallo al cargar BCRP, usando fallback:', e);
+      renderTicker(fallbackRows);
+    }
+  }
+
+  await load();
+  // Refresca cada 3 horas y al volver la pestaña visible
+  setInterval(load, 3 * 60 * 60 * 1000);
+  document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) load(); });
+})();
+</script>
+</body>
+</html>
