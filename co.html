@@ -6,14 +6,16 @@
 <title>Ticker Indicadores Colombia</title>
 <style>
   :root{
-    --alto: 40px;          /* Altura visible del ticker */
-    --velocidad: 35s;      /* Valor inicial; se recalcula según ancho */
+    --alto: 40px;          /* Altura visible del ticker (ajusta) */
+    --velocidad: 35s;      /* Se recalcula automáticamente */
     --padX: 24px;          /* Separación entre items */
     --bg: #0b1220;         /* Fondo */
     --fg: #e6edf6;         /* Texto principal */
     --muted: #9fb0c7;      /* Texto secundario */
     --accent: #7cc4ff;     /* Acento */
+    --dist: -300px;        /* Se sobrescribe en JS: distancia a desplazar = -ancho_del_grupo */
   }
+
   html,body{margin:0;padding:0;background:transparent}
   body{font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans", "Helvetica Neue", sans-serif}
 
@@ -61,9 +63,10 @@
   }
   .sep{ opacity:.2; font-size:14px; }
 
+  /* La animación usa una distancia en píxeles (—ancho_del_grupo) */
   @keyframes scroll{
     0%   { transform: translateX(0); }
-    100% { transform: translateX(-50%); } /* se recalcula la duración según ancho */
+    100% { transform: translateX(var(--dist)); }
   }
 
   @media (max-width: 480px){
@@ -82,6 +85,8 @@
 (async function(){
   /* ====== Personalización por URL ======
      ?alto=40&pxs=12&bg=%230b1220&fg=%23e6edf6&muted=%239fb0c7&accent=%237cc4ff
+     - alto: px de altura
+     - pxs: velocidad en px/seg (recalcula duración)
   */
   const P = new URLSearchParams(location.search);
   const alto   = P.get('alto');    if(alto)   document.documentElement.style.setProperty('--alto', `${parseInt(alto,10)}px`);
@@ -96,11 +101,6 @@
     try { return num.toLocaleString('es-CO', { style:'currency', currency:'COP', maximumFractionDigits:0 }); }
     catch{ return `COP ${Math.round(num).toString().replace(/\B(?=(\d{3})+(?!\d))/g,'.')}`; }
   }
-  function fmtPct(n){
-    const num = Number(n);
-    if (!isFinite(num)) return '';
-    return (num.toFixed(2).replace('.',',')) + '%';
-  }
   function dateStr(d){
     if(!d) return '';
     const tryDate = new Date(d);
@@ -109,9 +109,8 @@
   }
 
   /* ====== Fuentes ======
-     1) TRM (USD/COP) – Datos Abiertos Colombia (Socrata)
-        Usamos dos datasets alternativos y detectamos sus campos por heurística.
-     2) EUR→USD – ECB (para obtener EURUSD y calcular EUR/COP = EURUSD * USDCOP)
+     1) TRM (USD/COP) – Datos Abiertos Colombia (Socrata) (dos datasets fallback).
+     2) EUR→USD – BCE (para calcular EUR/COP = EURUSD * USDCOP)
   */
   async function fetchTRM(){
     const endpoints = [
@@ -133,13 +132,13 @@
         const valor = Number(row[valKey]);
         const fecha = row[dateKey];
         if(isFinite(valor)) return { valor, fecha };
-      }catch(e){ /* probar siguiente endpoint */ }
+      }catch(e){ /* probar siguiente */ }
     }
     throw new Error('No se pudo obtener TRM');
   }
 
   async function fetchEURUSD(){
-    // Serie: EXR/D.USD.EUR.SP00.A -> USD por EUR (última observación)
+    // Serie: EXR/D.USD.EUR.SP00.A -> USD por EUR (1 EUR = X USD), última observación
     const url = 'https://data-api.ecb.europa.eu/service/data/EXR/D.USD.EUR.SP00.A?lastNObservations=1&format=jsondata';
     const r = await fetch(url, { cache: 'no-store' });
     if(!r.ok) throw new Error('ECB error');
@@ -166,22 +165,25 @@
     `).join('');
   }
 
-  /* ====== Render con repetición dinámica para llenar todo el ancho ====== */
+  /* ====== Render que llena todo el ancho y anima por distancia en px ====== */
   function renderTicker(rows){
     const ticker = document.getElementById('ticker');
     const groupHTML = `<div class="group">${buildRows(rows)}</div>`;
 
-    // Medir ancho de un grupo "offline"
-    const temp = document.createElement('div');
-    temp.style.position = 'absolute';
-    temp.style.visibility = 'hidden';
-    temp.innerHTML = groupHTML;
-    document.body.appendChild(temp);
-    const groupWidth = temp.firstElementChild.scrollWidth || 1; // evitar división por 0
-    document.body.removeChild(temp);
+    // Medir ancho real de un grupo con estilos aplicados
+    const sandbox = document.createElement('div');
+    sandbox.style.position = 'absolute';
+    sandbox.style.visibility = 'hidden';
+    sandbox.style.left = '-99999px';
+    sandbox.innerHTML = groupHTML;
+    document.body.appendChild(sandbox);
+    const groupWidth = Math.max(1, sandbox.firstElementChild.scrollWidth); // evitar 0
+    document.body.removeChild(sandbox);
 
-    const viewportWidth = document.querySelector('.ticker-wrap').clientWidth || window.innerWidth;
-    const repeatsNeeded = Math.max(2, Math.ceil(viewportWidth / groupWidth) + 1);
+    // Repetir suficientes veces para cubrir al menos 2× el viewport (flujo continuo)
+    const wrap = document.querySelector('.ticker-wrap');
+    const viewportWidth = wrap?.clientWidth || window.innerWidth;
+    const repeatsNeeded = Math.max(3, Math.ceil((viewportWidth * 2) / groupWidth) + 1);
 
     let content = '';
     for(let i=0; i<repeatsNeeded; i++){
@@ -189,7 +191,10 @@
     }
     ticker.innerHTML = content;
 
-    // Ajustar duración de animación según ancho de un grupo y velocidad deseada
+    // Establecer distancia de animación = ancho de 1 grupo (en negativo)
+    document.documentElement.style.setProperty('--dist', `-${groupWidth}px`);
+
+    // Duración según velocidad deseada (px/s) y ancho del grupo
     const pxPerSec = P.get('pxs') ? Math.max(4, Number(P.get('pxs'))) : 10; // 10 px/s por defecto
     const duration = Math.max(18, Math.round(groupWidth / pxPerSec));
     ticker.style.animationDuration = duration + 's';
@@ -202,37 +207,42 @@
   ];
 
   /* ====== Carga y refresco ====== */
-  async function loadAndRender(){
+  let cachedRows = fallbackRows;
+
+  async function loadData(){
     try{
       const [trm, eurusd] = await Promise.all([fetchTRM(), fetchEURUSD()]);
-      const usdCop = trm.valor;                   // COP por USD
-      const eurUsd = eurusd.valor;                // USD por EUR
-      const eurCop = eurUsd * usdCop;             // COP por EUR
-
-      const rows = [
+      const usdCop = trm.valor;          // COP por USD (TRM)
+      const eurUsd = eurusd.valor;       // USD por EUR
+      const eurCop = eurUsd * usdCop;    // COP por EUR
+      cachedRows = [
         { label:'USD/COP', value: fmtCOP(usdCop), delta: dateStr(trm.fecha) },
         { label:'EUR/COP', value: fmtCOP(eurCop), delta: eurusd.fecha || '' }
       ];
-
-      renderTicker(rows.length ? rows : fallbackRows);
     }catch(e){
       console.warn('Fallo al cargar APIs, usando fallback:', e);
-      renderTicker(fallbackRows);
+      cachedRows = fallbackRows;
     }
+  }
+
+  async function loadAndRender(){
+    // Solo pedimos datos si aún no hay reales
+    if (cachedRows === fallbackRows) { await loadData(); }
+    renderTicker(cachedRows);
   }
 
   await loadAndRender();
 
-  // Refresca cada 3 horas y al volver la pestaña visible
+  // Refresca datos cada 3 horas y re-renderiza (también al volver a la pestaña)
   const THREE_HOURS = 3 * 60 * 60 * 1000;
-  setInterval(loadAndRender, THREE_HOURS);
-  document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) loadAndRender(); });
+  setInterval(async ()=>{ await loadData(); renderTicker(cachedRows); }, THREE_HOURS);
+  document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) renderTicker(cachedRows); });
 
-  // Recalcular al redimensionar (debounce)
+  // Recalcular al redimensionar (sin volver a pedir datos)
   let resizeTimer = null;
   window.addEventListener('resize', ()=>{
     clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(loadAndRender, 200);
+    resizeTimer = setTimeout(()=>renderTicker(cachedRows), 200);
   });
 
   // (Opcional) Pausa al hover:
