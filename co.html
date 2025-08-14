@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Ticker Indicadores Colombia</title>
+<style>
+  :root{
+    --alto: 40px;          /* Altura visible del ticker */
+    --velocidad: 35s;      /* Duración del loop (↑ más lento) */
+    --padX: 24px;          /* Separación entre items */
+    --bg: #0b1220;         /* Fondo */
+    --fg: #e6edf6;         /* Texto principal */
+    --muted: #9fb0c7;      /* Texto secundario */
+    --accent: #7cc4ff;     /* Acento */
+  }
+  html,body{margin:0;padding:0;background:transparent}
+  body{font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans", "Helvetica Neue", sans-serif}
+  .ticker-wrap{position:relative;width:100%;height:var(--alto);overflow:hidden;background:var(--bg);color:var(--fg)}
+  .ticker-wrap::before,.ticker-wrap::after{content:"";position:absolute;left:0;right:0;height:8px;pointer-events:none}
+  .ticker-wrap::before{top:0;background:linear-gradient(to bottom, rgba(0,0,0,.25), rgba(0,0,0,0))}
+  .ticker-wrap::after{bottom:0;background:linear-gradient(to top, rgba(0,0,0,.25), rgba(0,0,0,0))}
+  .ticker{position:absolute;display:flex;gap:var(--padX);white-space:nowrap;will-change:transform;align-items:center;height:100%;animation:scroll var(--velocidad) linear infinite}
+  .ticker>.group{display:flex;gap:var(--padX);align-items:center}
+  .item{display:flex;align-items:baseline;gap:10px;line-height:1;padding:0 6px}
+  .label{font-weight:600;letter-spacing:.2px;color:var(--muted);text-transform:uppercase;font-size:12px}
+  .value{font-variant-numeric:tabular-nums;font-weight:700;font-size:16px}
+  .delta{font-size:12px;padding:2px 6px;border-radius:999px;background:rgba(124,196,255,.12);color:var(--accent)}
+  .sep{opacity:.2;font-size:14px}
+  @keyframes scroll{0%{transform:translateX(0)}100%{transform:translateX(-50%)}}
+  @media (max-width:480px){:root{--alto:36px;--padX:16px}.value{font-size:14px}.label{font-size:11px}}
+</style>
+</head>
+<body>
+  <div class="ticker-wrap" role="region" aria-label="Indicadores económicos de Colombia">
+    <div id="ticker" class="ticker" aria-live="polite"></div>
+  </div>
+
+<script>
+(async function(){
+  /* ====== Personalización por URL ======
+     ?alto=40&pxs=12&bg=%230b1220&fg=%23e6edf6&muted=%239fb0c7&accent=%237cc4ff
+  */
+  const P = new URLSearchParams(location.search);
+  const alto   = P.get('alto');    if(alto)   document.documentElement.style.setProperty('--alto', `${parseInt(alto,10)}px`);
+  const bg     = P.get('bg');      if(bg)     document.documentElement.style.setProperty('--bg', bg);
+  const fg     = P.get('fg');      if(fg)     document.documentElement.style.setProperty('--fg', fg);
+  const muted  = P.get('muted');   if(muted)  document.documentElement.style.setProperty('--muted', muted);
+  const accent = P.get('accent');  if(accent) document.documentElement.style.setProperty('--accent', accent);
+
+  // ========= Helpers formato =========
+  function fmtCOP(n){
+    const num = Number(n);
+    try { return num.toLocaleString('es-CO', { style:'currency', currency:'COP', maximumFractionDigits:0 }); }
+    catch{ return `COP ${Math.round(num).toString().replace(/\B(?=(\d{3})+(?!\d))/g,'.')}`; }
+  }
+  function fmtPct(n){
+    const num = Number(n);
+    if (!isFinite(num)) return '';
+    return (num.toFixed(2).replace('.',',')) + '%';
+  }
+  function dateStr(d){
+    if(!d) return '';
+    try { return new Date(d).toLocaleDateString('es-CO'); }
+    catch { return String(d); }
+  }
+
+  // ========= Fuentes =========
+  // 1) TRM (USD/COP) – Socrata (Datos Abiertos Colombia)
+  // Dataset TRM: 32sa-8pi3 (o "TRM" ceyp-9c7c). Usamos /resource con heurística de campos.
+  async function fetchTRM(){
+    const endpoints = [
+      'https://www.datos.gov.co/resource/32sa-8pi3.json?$limit=1&$order=vigenciadesde%20DESC',
+      'https://www.datos.gov.co/resource/ceyp-9c7c.json?$limit=1&$order=fecha%20DESC'
+    ];
+    for(const url of endpoints){
+      try{
+        const r = await fetch(url, { cache: 'no-store' });
+        if(!r.ok) continue;
+        const arr = await r.json();
+        const row = Array.isArray(arr) && arr[0] ? arr[0] : null;
+        if(!row) continue;
+
+        // heurística de campos
+        const keys = Object.keys(row);
+        const valKey = keys.find(k => /^valor$/i.test(k)) || keys.find(k => /trm|tasa|valor/i.test(k));
+        const dateKey = keys.find(k => /(fecha|vigenciadesde|vigenciahasta|periodo)/i.test(k));
+
+        const valor = Number(row[valKey]);
+        const fecha = row[dateKey];
+        if(isFinite(valor)) return { valor, fecha };
+      }catch(e){ /* intenta el siguiente */ }
+    }
+    throw new Error('No se pudo obtener TRM');
+  }
+
+  // 2) EUR→USD (ECB SDMX) para calcular EUR/COP = (EURUSD) * (USDCOP)
+  async function fetchEURUSD(){
+    // Serie: EXR/D.USD.EUR.SP00.A -> USD por EUR (diario, spot, average)
+    const url = 'https://data-api.ecb.europa.eu/service/data/EXR/D.USD.EUR.SP00.A?lastNObservations=1&format=jsondata';
+    const r = await fetch(url, { cache: 'no-store' });
+    if(!r.ok) throw new Error('ECB error');
+    const j = await r.json();
+    // Navegar SDMX JSON compact
+    const obs = j?.data?.dataSets?.[0]?.series?.['0:0:0:0:0']?.observations;
+    const firstKey = obs ? Object.keys(obs)[0] : null;
+    const valor = firstKey ? Number(obs[firstKey][0]) : NaN;
+    // Fecha
+    const timePeriods = j?.data?.structure?.dimensions?.observation?.[0]?.values;
+    const fecha = (timePeriods && firstKey) ? timePeriods[Number(firstKey)]?.id : null;
+    if(!isFinite(valor)) throw new Error('ECB parse');
+    return { valor, fecha }; // USD por 1 EUR
+  }
+
+  // ======= Render =======
+  function buildRows(rows){
+    return rows.map((it,i)=>`
+      <div class="item" aria-label="${it.label} ${it.value}">
+        <span class="label">${it.label}</span>
+        <span class="value">${it.value}</span>
+        ${it.delta ? `<span class="delta">${it.delta}</span>` : ``}
+      </div>
+      ${i < rows.length-1 ? `<span class="sep">|</span>` : ``}
+    `).join('');
+  }
+
+  function renderTicker(rows){
+    const ticker = document.getElementById('ticker');
+    const group = `<div class="group">${buildRows(rows)}</div>`;
+    ticker.innerHTML = group + group;
+
+    const totalWidth = ticker.scrollWidth / 2;
+    const pxPerSec = P.get('pxs') ? Math.max(4, Number(P.get('pxs'))) : 10; // 10 px/s
+    const duration = Math.max(18, Math.round(totalWidth / pxPerSec));
+    ticker.style.animationDuration = duration + 's';
+  }
+
+  // ======= Carga =======
+  const fallbackRows = [
+    { label:'USD/COP', value: fmtCOP(4100), delta:'—' },
+    { label:'EUR/COP', value: fmtCOP(4500), delta:'—' }
+    // Puedes agregar aquí IPC y TPM fijos si lo deseas
+  ];
+
+  async function load(){
+    try{
+      const [trm, eurusd] = await Promise.all([fetchTRM(), fetchEURUSD()]);
+      const usdCop = trm.valor;                       // TRM (COP por USD)
+      const eurUsd = eurusd.valor;                    // USD por EUR
+      const eurCop = eurUsd * usdCop;                 // COP por EUR
+      const rows = [
+        { label:'USD/COP', value: fmtCOP(usdCop), delta: dateStr(trm.fecha) },
+        { label:'EUR/COP', value: fmtCOP(eurCop), delta: eurusd.fecha || '' }
+      ];
+
+      renderTicker(rows);
+    }catch(e){
+      console.warn('Fallo al cargar APIs, usando fallback:', e);
+      renderTicker(fallbackRows);
+    }
+  }
+
+  await load();
+
+  // Refresca cada 3 horas y al volver la pestaña visible
+  setInterval(load, 3 * 60 * 60 * 1000);
+  document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) load(); });
+
+  // (Opcional) Pausa al hover:
+  // const wrap = document.querySelector('.ticker-wrap');
+  // wrap.addEventListener('mouseenter', ()=>{ document.getElementById('ticker').style.animationPlayState='paused' });
+  // wrap.addEventListener('mouseleave', ()=>{ document.getElementById('ticker').style.animationPlayState='running' });
+})();
+</script>
+</body>
+</html>
