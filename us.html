@@ -1,1 +1,333 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Ticker Indicadores EE.UU.</title>
+<style>
+  :root{
+    --alto: 40px;          /* Altura visible del ticker (px) */
+    --velocidad: 35s;      /* Se recalcula automáticamente */
+    --padX: 24px;          /* Separación entre items */
+    --bg: #0b1220;         /* Fondo */
+    --fg: #e6edf6;         /* Texto principal */
+    --muted: #9fb0c7;      /* Texto secundario */
+    --accent: #7cc4ff;     /* Acento */
+    --dist: -300px;        /* Se sobrescribe en JS (= -ancho_del_grupo) */
+  }
 
+  html,body{margin:0;padding:0;background:transparent}
+  body{font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans", "Helvetica Neue", sans-serif}
+
+  .ticker-wrap{
+    position: relative;
+    width: 100%;
+    height: var(--alto);
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--fg);
+  }
+  .ticker-wrap::before,
+  .ticker-wrap::after{
+    content:"";
+    position:absolute; left:0; right:0;
+    height:8px; pointer-events:none;
+  }
+  .ticker-wrap::before{top:0; background: linear-gradient(to bottom, rgba(0,0,0,.25), rgba(0,0,0,0));}
+  .ticker-wrap::after{bottom:0; background: linear-gradient(to top, rgba(0,0,0,.25), rgba(0,0,0,0));}
+
+  .ticker{
+    position:absolute;
+    display:flex;
+    gap: var(--padX);
+    white-space: nowrap;
+    will-change: transform;
+    align-items:center;
+    height: 100%;
+    animation: scroll var(--velocidad) linear infinite;
+  }
+  .ticker > .group{display:flex; gap: var(--padX); align-items:center}
+
+  .item{
+    display:flex; align-items:baseline; gap:10px;
+    line-height:1; padding: 0 6px;
+  }
+  .label{
+    font-weight:600; letter-spacing:.2px;
+    color: var(--muted); text-transform: uppercase; font-size: 12px;
+  }
+  .value{ font-variant-numeric: tabular-nums; font-weight:700; font-size: 16px; }
+  .delta{
+    font-size: 12px; padding: 2px 6px; border-radius: 999px;
+    background: rgba(124,196,255,.12); color: var(--accent);
+  }
+  .sep{ opacity:.2; font-size:14px; }
+
+  @keyframes scroll{
+    0%   { transform: translateX(0); }
+    100% { transform: translateX(var(--dist)); } /* distancia = -ancho_del_grupo */
+  }
+
+  @media (max-width: 480px){
+    :root { --alto: 36px; --padX: 16px; }
+    .value{font-size:14px}
+    .label{font-size:11px}
+  }
+</style>
+</head>
+<body>
+  <div class="ticker-wrap" role="region" aria-label="Indicadores económicos de Estados Unidos">
+    <div id="ticker" class="ticker" aria-live="polite"></div>
+  </div>
+
+<script>
+(async function(){
+  /* =======================
+     Personalización por URL
+     =======================
+     ?alto=40&pxs=12&bg=%230b1220&fg=%23e6edf6&muted=%239fb0c7&accent=%237cc4ff
+     Parámetros manuales (si bloquean APIs):
+       &cpi=0.2     (IPC mensual, %)
+       &cpi12=3.1   (IPC 12 meses, %)
+       &unemp=4.1   (Desempleo U-3, %)
+  */
+  const P = new URLSearchParams(location.search);
+  const alto   = P.get('alto');    if(alto)   document.documentElement.style.setProperty('--alto', `${parseInt(alto,10)}px`);
+  const bg     = P.get('bg');      if(bg)     document.documentElement.style.setProperty('--bg', bg);
+  const fg     = P.get('fg');      if(fg)     document.documentElement.style.setProperty('--fg', fg);
+  const muted  = P.get('muted');   if(muted)  document.documentElement.style.setProperty('--muted', muted);
+  const accent = P.get('accent');  if(accent) document.documentElement.style.setProperty('--accent', accent);
+
+  /* ===== Helpers de formato ===== */
+  function fmtPct(n){
+    const num = Number(n);
+    if(!isFinite(num)) return '';
+    return (num.toFixed(2).replace('.',',')) + '%';
+  }
+  function dateStr(d){
+    if(!d) return '';
+    const tryDate = new Date(d);
+    if (!isNaN(tryDate)) return tryDate.toLocaleDateString('es-CL', { year:'numeric', month:'short' });
+    return String(d);
+  }
+
+  /* ===== Fuentes =====
+     1) EUR/USD – ECB SDMX: EXR/D.USD.EUR.SP00.A (USD por 1 EUR)
+     2) BLS – IPC (CPI: CUSR0000SA0, índice ajustado por temporada)
+        - Para calcular MoM y YoY necesitamos últimos 13 meses.
+     3) BLS – Tasa de desempleo (LNS14000000), valor ya viene en %
+  */
+  async function fetchEURUSD(){
+    const url = 'https://data-api.ecb.europa.eu/service/data/EXR/D.USD.EUR.SP00.A?lastNObservations=1&format=jsondata';
+    const r = await fetch(url, { cache: 'no-store' });
+    if(!r.ok) throw new Error('ECB error');
+    const j = await r.json();
+    const series = j?.data?.dataSets?.[0]?.series?.['0:0:0:0:0'];
+    const obs = series?.observations;
+    const k = obs ? Object.keys(obs)[0] : null;
+    const valor = k ? Number(obs[k][0]) : NaN; // USD por EUR
+    const periods = j?.data?.structure?.dimensions?.observation?.[0]?.values;
+    const fecha = (periods && k) ? periods[Number(k)]?.id : null;
+    if(!isFinite(valor)) throw new Error('ECB parse');
+    return { valor, fecha };
+  }
+
+  async function fetchBLS(seriesId, startYear, endYear){
+    const url = `https://api.bls.gov/publicAPI/v2/timeseries/data/${encodeURIComponent(seriesId)}?startyear=${startYear}&endyear=${endYear}`;
+    const r = await fetch(url, { cache: 'no-store' });
+    if(!r.ok) throw new Error('BLS error');
+    const j = await r.json();
+    const s = j?.Results?.series?.[0]?.data || [];
+    // BLS devuelve orden descendente por año/mes → [más reciente, ...]
+    return s;
+  }
+
+  function blsLatestVal(data){ // primer elemento
+    const d = Array.isArray(data) ? data[0] : null;
+    if(!d) return null;
+    const val = Number(d.value);
+    const date = new Date(`${d.periodName} 1, ${d.year}`);
+    return { valor: val, fecha: date.toISOString() };
+  }
+
+  function computeCPIChanges(cpiData){
+    // cpiData: lista descendente de observaciones del índice (ajustado), queremos MoM y YoY
+    if(!Array.isArray(cpiData) || cpiData.length < 13) return { mom: null, yoy: null, date: null };
+    const latest = Number(cpiData[0].value);
+    const prev   = Number(cpiData[1].value);
+    const lag12  = Number(cpiData[12].value);
+    if(!isFinite(latest) || !isFinite(prev) || !isFinite(lag12) || prev === 0 || lag12 === 0){
+      return { mom: null, yoy: null, date: null };
+    }
+    const mom = (latest/prev - 1) * 100;
+    const yoy = (latest/lag12 - 1) * 100;
+    const date = new Date(`${cpiData[0].periodName} 1, ${cpiData[0].year}`).toISOString();
+    return { mom, yoy, date };
+  }
+
+  /* ===== Construcción y render ===== */
+  function buildRows(rows){
+    return rows.map((it,i)=>`
+      <div class="item" aria-label="${it.label} ${it.value}">
+        <span class="label">${it.label}</span>
+        <span class="value">${it.value}</span>
+        ${it.delta ? `<span class="delta">${it.delta}</span>` : ``}
+      </div>
+      ${i < rows.length-1 ? `<span class="sep">|</span>` : ``}
+    `).join('');
+  }
+
+  function renderTicker(rows){
+    const ticker = document.getElementById('ticker');
+    const groupHTML = `<div class="group">${buildRows(rows)}</div>`;
+
+    // Medir ancho real del grupo
+    const sandbox = document.createElement('div');
+    sandbox.style.position = 'absolute';
+    sandbox.style.visibility = 'hidden';
+    sandbox.style.left = '-99999px';
+    sandbox.innerHTML = groupHTML;
+    document.body.appendChild(sandbox);
+    const groupWidth = Math.max(1, sandbox.firstElementChild.scrollWidth);
+    document.body.removeChild(sandbox);
+
+    // Repetir para cubrir ≥ 2× el viewport (flujo continuo) y arrancar lleno
+    const wrap = document.querySelector('.ticker-wrap');
+    const viewportWidth = wrap?.clientWidth || window.innerWidth;
+    const repeatsNeeded = Math.max(3, Math.ceil((viewportWidth * 2) / groupWidth) + 1);
+
+    let content = '';
+    for(let i=0; i<repeatsNeeded; i++){ content += groupHTML; }
+    ticker.innerHTML = content;
+
+    // Distancia de animación = ancho de un grupo (negativa)
+    document.documentElement.style.setProperty('--dist', `-${groupWidth}px`);
+
+    // Duración = ancho_del_grupo / (px/seg)
+    const pxPerSec = P.get('pxs') ? Math.max(4, Number(P.get('pxs'))) : 10; // 10 px/s por defecto
+    const duration = Math.max(18, Math.round(groupWidth / pxPerSec));
+    ticker.style.animationDuration = duration + 's';
+  }
+
+  /* ===== Fallback ===== */
+  const fallbackRows = [
+    { label:'EUR/USD', value: '1.08',  delta:'—' },
+    { label:'CPI',     value: fmtPct(0.20), delta:'—' },
+    { label:'CPI 12M', value: fmtPct(3.10), delta:'—' },
+    { label:'UNEMP',   value: fmtPct(4.00), delta:'—' }
+  ];
+
+  /* ===== Carga ===== */
+  let cachedRows = fallbackRows;
+
+  async function loadData(){
+    const now = new Date();
+    const startYear = now.getFullYear() - 1;
+    const endYear   = now.getFullYear();
+
+    // Objetos resultado
+    let eurusd = null, eurDate = null;
+    let cpiMom = null, cpiYoy = null, cpiDate = null;
+    let unemp = null, unempDate = null;
+
+    // 1) EUR/USD (ECB)
+    try{
+      const ecb = await fetchEURUSD();
+      eurusd = ecb.valor;        // USD por EUR
+      eurDate = ecb.fecha || null;
+    }catch(e){ console.warn('ECB no disponible', e); }
+
+    // 2) BLS – CPI (índice ajustado: CUSR0000SA0)
+    //    Si tu red lo bloquea, puedes pasar cpi y cpi12 por parámetros
+    try{
+      const cpiSeries = await fetchBLS('CUSR0000SA0', startYear, endYear);
+      const { mom, yoy, date } = computeCPIChanges(cpiSeries);
+      cpiMom = mom; cpiYoy = yoy; cpiDate = date;
+    }catch(e){ console.warn('BLS CPI no disponible', e); }
+
+    // 3) BLS – Unemployment Rate (LNS14000000)
+    try{
+      const uSeries = await fetchBLS('LNS14000000', startYear, endYear);
+      const uLast = blsLatestVal(uSeries);
+      if(uLast){ unemp = uLast.valor; unempDate = uLast.fecha; }
+    }catch(e){ console.warn('BLS Unemployment no disponible', e); }
+
+    // 4) Overwrite manual params si los pasaste en la URL
+    if(P.get('cpi') != null){
+      const v = Number(P.get('cpi'));
+      if(isFinite(v)) { cpiMom = v; cpiDate = cpiDate || new Date().toISOString(); }
+    }
+    if(P.get('cpi12') != null){
+      const v = Number(P.get('cpi12'));
+      if(isFinite(v)) { cpiYoy = v; cpiDate = cpiDate || new Date().toISOString(); }
+    }
+    if(P.get('unemp') != null){
+      const v = Number(P.get('unemp'));
+      if(isFinite(v)) { unemp = v; unempDate = unempDate || new Date().toISOString(); }
+    }
+
+    // Construcción de filas
+    const rows = [];
+
+    if(eurusd != null){
+      rows.push({ label:'EUR/USD', value: String((+eurusd).toFixed(4)), delta: dateStr(eurDate) });
+    }else{
+      rows.push(fallbackRows[0]);
+    }
+
+    if(cpiMom != null){
+      rows.push({ label:'CPI', value: fmtPct(cpiMom), delta: dateStr(cpiDate) });
+    }else{
+      rows.push(fallbackRows[1]);
+    }
+
+    if(cpiYoy != null){
+      rows.push({ label:'CPI 12M', value: fmtPct(cpiYoy), delta: dateStr(cpiDate) });
+    }else{
+      rows.push(fallbackRows[2]);
+    }
+
+    if(unemp != null){
+      rows.push({ label:'UNEMP', value: fmtPct(unemp), delta: dateStr(unempDate) });
+    }else{
+      rows.push(fallbackRows[3]);
+    }
+
+    cachedRows = rows.filter(Boolean);
+    if(cachedRows.length === 0) cachedRows = fallbackRows;
+  }
+
+  async function loadAndRender(){
+    if (cachedRows === fallbackRows) { await loadData(); }
+    renderTicker(cachedRows);
+  }
+
+  await loadAndRender();
+
+  // Refresca cada 3 horas, re-render al volver visible y al redimensionar
+  const THREE_HOURS = 3 * 60 * 60 * 1000;
+  setInterval(async ()=>{ await loadData(); renderTicker(cachedRows); }, THREE_HOURS);
+  document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) renderTicker(cachedRows); });
+
+  let resizeTimer = null;
+  window.addEventListener('resize', ()=>{
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(()=>renderTicker(cachedRows), 200);
+  });
+
+  /* ==============================
+     Ejemplos de uso del iframe
+     ==============================
+     1) Todo automático:
+        .../ticker-us.html?alto=40&pxs=12
+
+     2) Red bloquea APIs (valores manuales):
+        .../ticker-us.html?alto=40&pxs=12&cpi=0.20&cpi12=3.10&unemp=4.00
+
+     3) Cambiar colores:
+        .../ticker-us.html?alto=40&pxs=12&bg=%231a1d29&fg=%23ffffff&muted=%2390a4b7&accent=%23ffd166
+  */
+})();
+</script>
+</body>
+</html>
