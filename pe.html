@@ -38,16 +38,16 @@
 
 <script>
 (async function(){
-  // Series del BCRP (códigos oficiales)
-  const SERIES = {
-    usd:  "PN01219PM", // Tipo de cambio USD - bancario promedio (mensual)
-    eur:  "PN01235PM", // Tipo de cambio Euro - promedio (mensual)
-    ipcm: "PN01271PM", // IPC Lima Metropolitana - variación % mensual
-    ipcy: "PN01273PM", // IPC Lima Metropolitana - variación % 12 meses
-    tpm:  "PD04722MM"  // Tasa de referencia de la política monetaria (mensual)
-  };
+  /*
+    Fuentes:
+    1) USD/PEN y EUR/PEN: open.er-api.com (CORS habilitado, igual que py.html)
+    2) IPC mensual, IPC 12M, TPM: BCRP vía allorigins.win (proxy CORS)
+       La API del BCRP retorna: { periods:[{ name:"Feb.2026", values:[...] }] }
+       Orden de códigos (alfabético): PD04722MM=0(TPM), PN01271PM=1(IPC-m), PN01273PM=2(IPC-12M)
+  */
+  const BCRP_CODES = 'PD04722MM-PN01271PM-PN01273PM';
+  const BIDX = { tpm:0, ipcm:1, ipcy:2 };
 
-  // Permite personalizar vía querystring (?alto=40&pxs=12&bg=%230b1220&fg=%23e6edf6...)
   const P = new URLSearchParams(location.search);
   const alto   = P.get('alto');    if(alto)   document.documentElement.style.setProperty('--alto', `${parseInt(alto,10)}px`);
   const bg     = P.get('bg');      if(bg)     document.documentElement.style.setProperty('--bg', bg);
@@ -65,45 +65,42 @@
     if (!isFinite(num)) return '';
     return (num.toFixed(2).replace('.',',')) + '%';
   }
-  function dateStrYYYYMM(d){
+
+  // Parsea el formato de período del BCRP: "Feb.2026", "Ene.2025", etc.
+  function dateStr(d){
     if(!d) return '';
-    // Las series del BCRP vienen como "Ene25", "2025-07", etc. El JSON incluye "periodo" y "fecha" según serie.
+    const MESES = { Ene:0,Feb:1,Mar:2,Abr:3,May:4,Jun:5,Jul:6,Ago:7,Sep:8,Oct:9,Nov:10,Dic:11 };
+    // Formato BCRP: "Feb.2026"
+    const m = String(d).match(/^([A-Za-z]{3})\.(\d{4})$/);
+    if(m){
+      const mon = MESES[m[1]];
+      if(mon !== undefined) return new Date(parseInt(m[2]), mon, 1).toLocaleDateString('es-PE');
+    }
+    // Fallback: intento directo con Date
     try{
       const dt = new Date(d);
-      if(!isNaN(dt)) return dt.toLocaleDateString('es-PE', { year:'numeric', month:'short' });
+      if(!isNaN(dt)) return dt.toLocaleDateString('es-PE');
     }catch(e){}
     return String(d);
   }
 
-  // Llama al API del BCRP para varias series a la vez
-  async function fetchSeries(codes){
-    const base = "https://estadisticas.bcrp.gob.pe/estadisticas/series/api";
-    const url  = `${base}/${codes.join('-')}/json`;
-    const res  = await fetch(url, { cache: "no-store" });
-    if(!res.ok) throw new Error(res.statusText);
-    return res.json();
+  function val(values, idx){
+    const v = Number(values?.[idx]);
+    return isFinite(v) ? v : null;
   }
 
-  // Extrae el último dato de una serie BCRP (estructura JSON)
-  function latestFromBCRP(serie){
-    // Formato típico:
-    // { nombre, codigo, periodicidad, unidad, formato, fuente, data: [{periodo:"2025-07", valor:"3.54"} ...] }
-    const d = Array.isArray(serie?.data) ? serie.data : [];
-    if(!d.length) return null;
-    const x = d[d.length - 1]; // el último registro
-    const val = Number(x.valor);
-    return { valor: val, periodo: x.periodo, fecha: x.fecha || x.periodo || null, unidad: serie.unidad || '' };
-  }
-
-  function buildRows(lat){
+  function buildRows(rates, bcrp){
     const rows = [];
-
-    if(lat.usd) rows.push({ label:'USD/PEN',   value: fmtPEN(lat.usd.valor),  delta: dateStrYYYYMM(lat.usd.fecha) });
-    if(lat.eur) rows.push({ label:'EUR/PEN',   value: fmtPEN(lat.eur.valor),  delta: dateStrYYYYMM(lat.eur.fecha) });
-    if(lat.ipcm)rows.push({ label:'IPC',       value: fmtPct(lat.ipcm.valor), delta: dateStrYYYYMM(lat.ipcm.fecha) });
-    if(lat.ipcy)rows.push({ label:'IPC 12M',   value: fmtPct(lat.ipcy.valor), delta: dateStrYYYYMM(lat.ipcy.fecha) });
-    if(lat.tpm) rows.push({ label:'TPM',       value: fmtPct(lat.tpm.valor),  delta: dateStrYYYYMM(lat.tpm.fecha) });
-
+    if(rates){
+      if(rates.usd != null) rows.push({ label:'USD/PEN', value: fmtPEN(rates.usd.valor), delta: dateStr(rates.usd.fecha) });
+      if(rates.eur != null) rows.push({ label:'EUR/PEN', value: fmtPEN(rates.eur.valor), delta: dateStr(rates.eur.fecha) });
+    }
+    if(bcrp){
+      const f = dateStr(bcrp.periodo);
+      if(bcrp.ipcm != null) rows.push({ label:'IPC',     value: fmtPct(bcrp.ipcm), delta: f });
+      if(bcrp.ipcy != null) rows.push({ label:'IPC 12M', value: fmtPct(bcrp.ipcy), delta: f });
+      if(bcrp.tpm  != null) rows.push({ label:'TPM',     value: fmtPct(bcrp.tpm),  delta: f });
+    }
     return rows;
   }
 
@@ -125,47 +122,72 @@
     }
     ticker.innerHTML = groupHTML() + groupHTML();
 
-    // Ajuste de velocidad según ancho total o parámetro pxs
     const totalWidth = ticker.scrollWidth / 2;
-    const pxPerSec = P.get('pxs') ? Math.max(4, Number(P.get('pxs'))) : 10; // 10 px/s por defecto
+    const pxPerSec = P.get('pxs') ? Math.max(4, Number(P.get('pxs'))) : 10;
     const duration = Math.max(18, Math.round(totalWidth / pxPerSec));
     ticker.style.animationDuration = duration + 's';
   }
 
-  // Valores de respaldo por si el API falla (para no quedar en blanco)
   const fallbackRows = [
-    { label:'USD/PEN', value: fmtPEN(3.55), delta:'—' },
-    { label:'EUR/PEN', value: fmtPEN(3.90), delta:'—' },
-    { label:'IPC',     value: fmtPct(0.20),  delta:'—' },
-    { label:'IPC 12M', value: fmtPct(3.00),  delta:'—' },
-    { label:'TPM',     value: fmtPct(4.75),  delta:'—' }
+    { label:'USD/PEN', value: fmtPEN(3.36), delta:'—' },
+    { label:'EUR/PEN', value: fmtPEN(3.97), delta:'—' },
+    { label:'IPC',     value: fmtPct(0.69), delta:'—' },
+    { label:'IPC 12M', value: fmtPct(2.21), delta:'—' },
+    { label:'TPM',     value: fmtPct(4.25), delta:'—' }
   ];
 
+  // USD/PEN y EUR/PEN desde open.er-api.com (CORS habilitado)
+  async function fetchRates(){
+    const res  = await fetch('https://open.er-api.com/v6/latest/USD', { cache:'no-store' });
+    if(!res.ok) throw new Error('er-api error');
+    const j    = await res.json();
+    const pen  = j.rates?.PEN;
+    const eur  = j.rates?.EUR;
+    const date = j.time_last_update_utc ? new Date(j.time_last_update_utc).toISOString().slice(0,10) : null;
+    if(!pen || !eur) throw new Error('Sin PEN/EUR');
+    return {
+      usd: { valor: pen,       fecha: date },
+      eur: { valor: pen / eur, fecha: date }   // EUR/PEN = (USD/PEN) / (EUR/USD)
+    };
+  }
+
+  // IPC y TPM desde BCRP — directo al proxy (sabemos que la URL directa bloquea CORS)
+  async function fetchBCRP(){
+    const direct = `https://estadisticas.bcrp.gob.pe/estadisticas/series/api/${BCRP_CODES}/json`;
+    const proxy  = `https://api.allorigins.win/raw?url=${encodeURIComponent(direct)}`;
+    const res  = await fetch(proxy, { cache:'no-store' });
+    if(!res.ok) throw new Error(`allorigins ${res.status}`);
+    const json = await res.json();
+    const data = typeof json?.contents === 'string' ? JSON.parse(json.contents) : json;
+    if(!Array.isArray(data.periods) || !data.periods.length) throw new Error('Sin períodos BCRP');
+    const last = data.periods[data.periods.length - 1];
+    return {
+      periodo: last.name,
+      tpm:  val(last.values, BIDX.tpm),
+      ipcm: val(last.values, BIDX.ipcm),
+      ipcy: val(last.values, BIDX.ipcy),
+    };
+  }
+
   async function load(){
-    try{
-      const json = await fetchSeries([SERIES.usd, SERIES.eur, SERIES.ipcm, SERIES.ipcy, SERIES.tpm]);
-      // json tiene { config:{}, series:[{codigo, data:[...]} ...] }
-      const map = {};
-      (json.series || []).forEach(s => { map[s.codigo] = latestFromBCRP(s); });
+    // Mostrar fallback inmediatamente mientras cargan las APIs
+    renderTicker(fallbackRows);
 
-      const latest = {
-        usd:  map[SERIES.usd],
-        eur:  map[SERIES.eur],
-        ipcm: map[SERIES.ipcm],
-        ipcy: map[SERIES.ipcy],
-        tpm:  map[SERIES.tpm]
-      };
+    let ratesData = null;
+    let bcrpData  = null;
 
-      const rows = buildRows(latest);
-      renderTicker(rows.length ? rows : fallbackRows);
-    }catch(e){
-      console.warn('Fallo al cargar BCRP, usando fallback:', e);
-      renderTicker(fallbackRows);
-    }
+    // En cuanto llegan los tipos de cambio (rápido) → re-renderizar
+    fetchRates()
+      .then(r => { ratesData = r; renderTicker(buildRows(ratesData, bcrpData)); })
+      .catch(e => console.warn('[PE] Tipos de cambio no disponibles:', e.message));
+
+    // En cuanto llega el BCRP (proxy, más lento) → re-renderizar de nuevo
+    fetchBCRP()
+      .then(b => { bcrpData = b; renderTicker(buildRows(ratesData, bcrpData)); })
+      .catch(e => console.warn('[PE] IPC/TPM no disponibles:', e.message));
   }
 
   await load();
-  // Refresca cada 3 horas y al volver la pestaña visible
   setInterval(load, 3 * 60 * 60 * 1000);
   document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) load(); });
 })();
